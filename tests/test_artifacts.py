@@ -146,8 +146,10 @@ class TestTeamsFile:
         teams = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")["teams.json"]
         assert teams["round_metrics"]["rounds"] == 1
         assert teams["round_table"][0]["planted"] is True
-        assert teams["economy_thresholds"] == {"eco_below": analyze.ECO_MAX,
-                                               "full_above": analyze.FORCE_MAX}
+        c = teams["conventions"]
+        assert (c["eco_below"], c["full_above"]) == (analyze.ECO_MAX, analyze.FORCE_MAX)
+        assert c["trade_range_units"] == analyze.TRADE_RANGE
+        assert c["trade_window_s"] == analyze.TRADE_WINDOW / analyze.TR
 
     def test_sites_come_from_coordinates(self, match):
         teams = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")["teams.json"]
@@ -156,6 +158,11 @@ class TestTeamsFile:
     def test_pair_matrices_are_carried_verbatim(self, match):
         teams = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")["teams.json"]
         assert teams["pairs"]["traded_for"][analyze.ME]["LipT0N"] == 2
+
+    def test_trade_chances_travel_with_the_trades(self, match):
+        """traded_for without tradeable is a count nobody can turn into a rate."""
+        teams = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")["teams.json"]
+        assert "tradeable" in teams["pairs"]
 
 
 def test_everything_is_json_serialisable(match):

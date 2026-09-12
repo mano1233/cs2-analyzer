@@ -208,8 +208,8 @@ def build_team(matches, generated):
                        num(h1["moving 1st shot%"], 1), num(h2["moving 1st shot%"], 1),
                        num(h1["util thrown/r"]), num(h2["util thrown/r"])])
 
-    def matrix_table(key, mean, digits):
-        m = analyze.pair_matrix(matches, key, names, mean=mean)
+    def matrix_table(key, mean, digits, over=None, scale=1.0):
+        m = analyze.pair_matrix(matches, key, names, mean=mean, over=over, scale=scale)
         rows = [[link(a)] + [num(m[a][b], digits, dash="&mdash;") for b in names] for a in names]
         return table([""] + names, rows)
 
@@ -232,13 +232,44 @@ def build_team(matches, generated):
 {matrix_table("traded_for", False, 0)}
 </section>
 <section>
+<h2>Trades taken, as a share of the trades that were on (%)</h2>
+{matrix_table("traded_for", False, 0, over="tradeable", scale=100)}
+<p class="note">The denominator is the number of times the column player died while the
+row player was alive and within {num(analyze.TRADE_RANGE * analyze.UNIT_M, 0)} m
+<em>of the killer</em> &mdash; standing near the body does not let you punish anyone.
+A dash means the chance never came up, which is a spacing problem, not a trading one.
+It is a range check, not a line of sight check: we have positions, not map geometry, so
+a teammate behind a wall still counts as in range.</p>
+</section>
+<section>
 <h2>Flash conversions: row's flash, column got the kill</h2>
 {matrix_table("flash_conv", False, 0)}
+<p class="note">Counts, so whoever throws most tends to lead. Per-flash conversion is on
+each player's own page. A flash only counts here if it blinded an enemy for at least
+{num(analyze.EFFECTIVE_BLIND, 1)}s and the kill landed inside that blindness &mdash; a
+strict window that will miss the pop-flash that bought a free peek a second later.</p>
 </section>
 <section>
 <h2>Average distance while both alive (metres)</h2>
 {matrix_table("prox_sum", True, 1)}
 <p class="note">Trades need roughly 10-15 m and a shared corridor. Beyond about 20 m you arrive after the fight is decided.</p>
+</section>
+<section>
+<h2>How far apart we die (metres)</h2>
+{matrix_table("death_dist_sum", False, 1, over="death_dist_n", scale=analyze.UNIT_M)}
+<p class="note">Row died; column was this far away, on average. Large numbers next to a
+low trade share say the team is spread out, not that anyone is refusing to trade.</p>
+</section>
+<section>
+<h2>What these numbers assume</h2>
+<p class="note">Conventions, not measurements, stated so they can be argued with:
+a trade is a kill on the killer within {num(analyze.TRADE_WINDOW / analyze.TR, 0)}s;
+trade range is {int(analyze.TRADE_RANGE)} units ({num(analyze.TRADE_RANGE * analyze.UNIT_M, 0)} m);
+a flash counts as effective at {num(analyze.EFFECTIVE_BLIND, 1)}s of blindness;
+a first shot counts as moving above {int(analyze.MOVING)} u/s;
+and a round is an eco below ${int(analyze.ECO_MAX)} of team equipment, a full buy above
+${int(analyze.FORCE_MAX)}, and a force in between. Team equipment is read at freeze end,
+so a mid-round pickup does not move the round between buckets.</p>
 </section>"""
     return page("Who trades whom", body, generated, nav='<a href="index.html">&larr; Personal report</a>')
 
@@ -275,13 +306,17 @@ def build_player(matches, name, names, roles, generated):
                        num(h["moving 1st shot%"], 1), num(h["util thrown/r"]), h["open W/L"]])
 
     trades = analyze.pair_matrix(matches, "traded_for", names)
+    taken = analyze.pair_matrix(matches, "traded_for", names, over="tradeable", scale=100)
     flashes = analyze.pair_matrix(matches, "flash_conv", names)
     prox = analyze.pair_matrix(matches, "prox_sum", names, mean=True)
     pairs = []
     for other in names:
         if other == name:
             continue
-        pairs.append([link(other), num(trades[name][other], 0), num(trades[other][name], 0),
+        pairs.append([link(other), num(trades[name][other], 0),
+                      num(taken[name][other], 0, dash="&mdash;"),
+                      num(trades[other][name], 0),
+                      num(taken[other][name], 0, dash="&mdash;"),
                       num(flashes[name][other], 0), num(flashes[other][name], 0),
                       num(prox[name][other], 1)])
 
@@ -312,7 +347,11 @@ def build_player(matches, name, names, roles, generated):
 </section>
 <section>
 <h2>With the others</h2>
-{table(["Teammate", "Trades for them", "They trade for", "Flashes into their kills", "Their flashes into yours", "Distance (m)"], pairs)}
+{table(["Teammate", "Trades for them", "of chances %", "They trade for", "of chances %",
+        "Flashes into their kills", "Their flashes into yours", "Distance (m)"], pairs)}
+<p class="note">"Of chances" is the share of that player's deaths where you were alive and
+within {num(analyze.TRADE_RANGE * analyze.UNIT_M, 0)} m of whoever killed them. A dash
+means you were never in position to trade &mdash; nothing to convert, so nothing to score.</p>
 </section>
 <section>
 <h2>Match by match</h2>
