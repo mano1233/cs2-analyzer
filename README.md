@@ -68,6 +68,7 @@ CI runs them on every push and pull request, and the image build depends on them
 | `R2_BUCKET`, `R2_ENDPOINT` | S3-compatible target holding `demos/`, `results/`, `state/` |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | R2 credentials (Terraform mints these) |
 | `FACEIT_API_KEY` | Server-side FACEIT Data API key. Empty is valid: it then only parses demos already in the bucket |
+| `FACEIT_DOWNLOADS_TOKEN` | Token with Downloads API scope. Without it no demo can be fetched: the Data API's `demo_url` is a private resource URL whose host does not resolve, and it must be exchanged for a signed URL via `POST /download/v2/demos/download`. Access is by application (fce.gg/downloads-api-application, ~30 days) |
 | `FACEIT_NICKNAME` | Whose matches to fetch and whose stats to track |
 | `MAX_PER_RUN` | Cap on demos downloaded and parsed per run |
 | `FACEIT_WINDOW_DAYS` | How far back to look for matches (default 21 - "the last three weeks", not a fixed match count) |
@@ -77,6 +78,16 @@ CI runs them on every push and pull request, and the image build depends on them
 
 Output: `results/results.json` (full per-match, per-player counters) and
 `results/trend.csv` (one row per match with the headline metrics).
+
+## Getting demos in
+
+Two routes, and the job parses whatever it finds either way:
+
+1. **Upload them.** Anything under the bucket's `demos/` prefix (`.dem`, `.dem.zst`,
+   `.dem.bz2`) is parsed on the next run. This is the only route that works today, and
+   the only one for Premier demos, which CS2 writes to disk locally.
+2. **Let the job fetch them**, once `FACEIT_DOWNLOADS_TOKEN` exists. The Data API alone
+   is not enough - its demo URLs are private resource URLs, not downloadable links.
 
 ## Notes
 

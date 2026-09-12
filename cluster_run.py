@@ -36,6 +36,12 @@ BUCKET = os.environ.get("R2_BUCKET", "")
 ENDPOINT = os.environ.get("R2_ENDPOINT", "")
 NICKNAME = os.environ.get("FACEIT_NICKNAME", "mirithefish")
 API_KEY = os.environ.get("FACEIT_API_KEY", "")
+# The Data API's demo_url is a private resource URL whose host does not resolve. It
+# must be exchanged for a signed URL through the Downloads API, which needs its own
+# token (application form, ~30 day wait). Without it, demos can only arrive by being
+# uploaded to the bucket - which this job parses just the same.
+DOWNLOADS_TOKEN = os.environ.get("FACEIT_DOWNLOADS_TOKEN", "")
+DOWNLOADS_API = "https://open.faceit.com/download/v2/demos/download"
 SCRATCH = pathlib.Path(os.environ.get("SCRATCH", "/scratch"))
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "5"))
 HISTORY_PAGE = int(os.environ.get("FACEIT_HISTORY_PAGE", "50"))
@@ -120,10 +126,26 @@ def faceit_history():
             return items
 
 
+def signed_url(resource_url):
+    """Exchange a private resource URL for a temporary signed download URL."""
+    req = urllib.request.Request(
+        DOWNLOADS_API, method="POST",
+        data=json.dumps({"resource_url": resource_url}).encode(),
+        headers={"Authorization": "Bearer " + DOWNLOADS_TOKEN,
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        payload = json.loads(r.read())
+    return payload.get("payload", {}).get("download_url") or payload.get("download_url")
+
+
 def fetch_faceit(state):
     """Download demos for matches not yet seen. Returns list of new R2 demo keys."""
     if not API_KEY:
         log("FACEIT_API_KEY empty - skipping FACEIT fetch")
+        return []
+    if not DOWNLOADS_TOKEN:
+        log("no FACEIT_DOWNLOADS_TOKEN: demo URLs from the Data API are private and "
+            "cannot be fetched. Upload demos to the bucket's demos/ prefix instead.")
         return []
     done = set(state.get("faceit_matches", []))
     try:
@@ -152,16 +174,20 @@ def fetch_faceit(state):
             continue
         key = DEMO_PREFIX + mid + ".dem.zst"
         local = SCRATCH / (mid + ".dem.zst")
-        host = urllib.parse.urlsplit(urls[0]).hostname
         attempted += 1
         try:
-            urllib.request.urlretrieve(urls[0], local)
+            url = signed_url(urls[0])
+            if not url:
+                log("no download_url returned for %s" % mid)
+                continue
+            host = urllib.parse.urlsplit(url).hostname
+            urllib.request.urlretrieve(url, local)
             s3().upload_file(str(local), BUCKET, key)
             log("stored %s (%.0f MB)" % (key, local.stat().st_size / 1e6))
             added.append(key)
             done.add(mid)
         except Exception as e:
-            log("fetch failed for %s from %s: %r" % (mid, host, e))
+            log("fetch failed for %s: %r" % (mid, e))
         finally:
             local.unlink(missing_ok=True)
     state["faceit_matches"] = sorted(done)

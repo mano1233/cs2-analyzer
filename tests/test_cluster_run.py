@@ -91,3 +91,18 @@ class TestConfig:
     def test_trend_fields_match_the_row_builder(self, match):
         row = cluster_run.row_for(match, "k")
         assert list(row) == cluster_run.TREND_FIELDS
+
+
+class TestDownloadsGate:
+    def test_no_downloads_token_skips_the_fetch_entirely(self, monkeypatch):
+        """Data API demo URLs are private; without the Downloads token there is nothing
+        to try, so the run must not walk the whole window failing per match."""
+        monkeypatch.setattr(cluster_run, "API_KEY", "key")
+        monkeypatch.setattr(cluster_run, "DOWNLOADS_TOKEN", "")
+        called = []
+        monkeypatch.setattr(cluster_run, "faceit_history", lambda: called.append(1) or [])
+        logged = []
+        monkeypatch.setattr(cluster_run, "log", logged.append)
+        assert cluster_run.fetch_faceit({}) == []
+        assert not called
+        assert any("FACEIT_DOWNLOADS_TOKEN" in m for m in logged)
