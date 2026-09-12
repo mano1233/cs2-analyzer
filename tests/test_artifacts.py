@@ -141,6 +141,29 @@ class TestPlayerFiles:
         assert set(me["demo"]["scopes"]) == {"all", "t", "ct", "h1", "h2", "ot"}
 
 
+class TestMatchId:
+    """The join key between a demo object and FACEIT's stats for the same match."""
+
+    def test_the_faceit_map_suffix_is_not_part_of_the_match_id(self):
+        """FACEIT names the demo <match_id>-1-1.dem. Keeping the suffix meant every
+        lookup against the stats missed, so no player file ever had a faceit block."""
+        assert (artifacts.match_id_from("demos/1-0555cef1-990d-4197-8f9d-16b173ef1a67-1-1.dem.zst")
+                == "1-0555cef1-990d-4197-8f9d-16b173ef1a67")
+
+    def test_an_id_without_a_suffix_is_unchanged(self):
+        assert artifacts.match_id_from("demos/1-abc.dem") == "1-abc"
+
+    def test_premier_names_keep_their_trailing_numbers(self):
+        """match730_<matchid>_<outcomeid>_<token> is all identity, not a map suffix."""
+        name = "match730_003846_0038_1234"
+        assert artifacts.match_id_from("demos/%s.dem" % name) == name
+
+    def test_the_second_map_of_a_series_is_a_different_match(self):
+        a = artifacts.match_id_from("demos/1-abcdef-1-1.dem.zst")
+        b = artifacts.match_id_from("demos/1-abcdef-2-1.dem.zst")
+        assert a == b == "1-abcdef"
+
+
 class TestTeamsFile:
     def test_carries_round_table_metrics_and_thresholds(self, match):
         teams = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")["teams.json"]

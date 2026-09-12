@@ -137,7 +137,7 @@ def build(results, stats_rows=(), date_for=None):
     players, matches = [], []
     for match in results:
         key = match.get("source_key", match.get("demo", ""))
-        match_id = str(key).split("/")[-1].split(".dem")[0]
+        match_id = artifacts.match_id_from(key)
         date = (date_for or (lambda m, i: artifacts.match_date(m)))(match, match_id)
         rows = [r for r in (stats_rows or ()) if r.get("match_id") == match_id]
         players += player_rows(match, match_id, date, rows)
