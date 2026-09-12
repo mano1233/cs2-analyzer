@@ -81,6 +81,16 @@ def esc(v):
     return html.escape(str(v))
 
 
+def slug(name):
+    """Filename for a player page. Names come from demos, so keep only safe chars."""
+    keep = "".join(c if c.isalnum() or c in "-_" else "-" for c in name)
+    return "player-%s.html" % keep.strip("-").lower()
+
+
+def link(name):
+    return f'<a href="{esc(slug(name))}">{esc(name)}</a>'
+
+
 def num(v, digits=2, dash="-"):
     if v is None:
         return dash
@@ -183,7 +193,7 @@ def build_team(matches, generated):
     indiv = []
     for n in names:
         r = analyze.rates(pooled[n])
-        indiv.append([n, f'<span class="role">{esc(roles[n])}</span>', int(r["rounds"]),
+        indiv.append([link(n), f'<span class="role">{esc(roles[n])}</span>', int(r["rounds"]),
                       num(r["K/D"]), num(r["ADR"], 1), num(r["HS%"], 1), num(r["accuracy%"], 1),
                       num(r["moving 1st shot%"], 1), num(r["util thrown/r"]), r["open W/L"]])
 
@@ -192,13 +202,13 @@ def build_team(matches, generated):
         h1 = analyze.scope_rates(pooled[n], "h1_")
         h2 = analyze.scope_rates(pooled[n], "h2_")
         delta = h2["ADR"] - h1["ADR"] if h1["rounds"] and h2["rounds"] else float("nan")
-        halves.append([n, h1["rounds"], num(h1["ADR"], 1), num(h2["ADR"], 1), num(delta, 1),
+        halves.append([link(n), h1["rounds"], num(h1["ADR"], 1), num(h2["ADR"], 1), num(delta, 1),
                        num(h1["moving 1st shot%"], 1), num(h2["moving 1st shot%"], 1),
                        num(h1["util thrown/r"]), num(h2["util thrown/r"])])
 
     def matrix_table(key, mean, digits):
         m = analyze.pair_matrix(matches, key, names, mean=mean)
-        rows = [[a] + [num(m[a][b], digits, dash="&mdash;") for b in names] for a in names]
+        rows = [[link(a)] + [num(m[a][b], digits, dash="&mdash;") for b in names] for a in names]
         return table([""] + names, rows)
 
     body = f"""<header class="masthead">
@@ -231,6 +241,85 @@ def build_team(matches, generated):
     return page("Who trades whom", body, generated, nav='<a href="index.html">&larr; Personal report</a>')
 
 
+def build_player(matches, name, names, roles, generated):
+    pooled = analyze.pool(m["players"][name] for m in matches if name in m["players"])
+    r = analyze.rates(pooled)
+    sig = analyze.role_signals(pooled)
+    role = roles[name]
+    played = [m for m in matches if name in m["players"]]
+
+    # Role-specific first: an entry and a support fail in different ways.
+    kpis = [(k, r[k]) for k in analyze.ROLE_KPIS[role] if k in r]
+    kpi_cards = "".join(
+        f'<div class="card"><span class="label">{esc(k)}</span>'
+        f'<span class="value">{num(v, 2 if isinstance(v, float) and abs(v) < 10 else 1)}</span></div>'
+        for k, v in kpis)
+
+    sides = [["T", int(pooled["t_rounds"]),
+              num(analyze.scope_rates(pooled, "t_")["ADR"], 1),
+              analyze.scope_rates(pooled, "t_")["open W/L"],
+              num(analyze.scope_rates(pooled, "t_")["util thrown/r"])],
+             ["CT", int(pooled["ct_rounds"]),
+              num(analyze.scope_rates(pooled, "ct_")["ADR"], 1),
+              analyze.scope_rates(pooled, "ct_")["open W/L"],
+              num(analyze.scope_rates(pooled, "ct_")["util thrown/r"])]]
+
+    halves = []
+    for label, prefix in (("1st half", "h1_"), ("2nd half", "h2_"), ("Overtime", "ot_")):
+        h = analyze.scope_rates(pooled, prefix)
+        if not h["rounds"]:
+            continue
+        halves.append([label, h["rounds"], num(h["ADR"], 1), num(h["K/D"]),
+                       num(h["moving 1st shot%"], 1), num(h["util thrown/r"]), h["open W/L"]])
+
+    trades = analyze.pair_matrix(matches, "traded_for", names)
+    flashes = analyze.pair_matrix(matches, "flash_conv", names)
+    prox = analyze.pair_matrix(matches, "prox_sum", names, mean=True)
+    pairs = []
+    for other in names:
+        if other == name:
+            continue
+        pairs.append([link(other), num(trades[name][other], 0), num(trades[other][name], 0),
+                      num(flashes[name][other], 0), num(flashes[other][name], 0),
+                      num(prox[name][other], 1)])
+
+    per_match = []
+    for m in sorted(played, key=lambda m: m.get("source_key", m["demo"])):
+        mr = analyze.rates(m["players"][name])
+        won = int(m["players"][name].get("rounds_won", 0))
+        per_match.append([m["map"].replace("de_", ""), f'{won}-{m["rounds"] - won}',
+                          num(mr["K/D"]), num(mr["ADR"], 1), num(mr["moving 1st shot%"], 1),
+                          num(mr["util thrown/r"]), mr["open W/L"]])
+
+    body = f"""<header class="masthead">
+<p class="eyebrow">{esc(len(played))} matches &middot; {int(r["rounds"])} rounds &middot; <span class="role">{esc(role)}</span></p>
+<h1>{esc(name)}</h1>
+<p class="note">Measured against the job this player actually does. Role signals: first contact {num(sig["first_contact/r"])}/round, utility {num(sig["util/r"])}/round, AWP share {num(100 * sig["AWP kill share"], 0)}%, survival {num(sig["survival%"], 0)}%.</p>
+</header>
+<section>
+<h2>The job</h2>
+<div class="cards">{kpi_cards}</div>
+</section>
+<section>
+<h2>By side</h2>
+{table(["Side", "Rounds", "ADR", "1st duels", "Util/r"], sides)}
+</section>
+<section>
+<h2>By half</h2>
+{table(["Scope", "Rounds", "ADR", "K/D", "Moving 1st%", "Util/r", "1st duels"], halves)}
+</section>
+<section>
+<h2>With the others</h2>
+{table(["Teammate", "Trades for them", "They trade for", "Flashes into their kills", "Their flashes into yours", "Distance (m)"], pairs)}
+</section>
+<section>
+<h2>Match by match</h2>
+{table(["Map", "Result", "K/D", "ADR", "Moving 1st%", "Util/r", "1st duels"], per_match)}
+</section>"""
+    return page(name, body, generated,
+                nav='<a href="team.html">&larr; Team report</a> &middot; <a href="index.html">Personal report</a>')
+
+
 def render(matches, out_dir):
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -242,9 +331,17 @@ def render(matches, out_dir):
                  '<p class="note">The analyzer has not parsed a demo with this player in it.</p></header>',
                  generated), encoding="utf-8")
         return [out / "index.html"]
+    names = analyze.roster(playable)
+    pooled = analyze.pooled_players(playable, names)
+    roles = analyze.assign_roles({n: analyze.role_signals(pooled[n]) for n in names})
+
+    pages = {"index.html": build_index(playable, generated),
+             "team.html": build_team(playable, generated)}
+    for n in names:
+        pages[slug(n)] = build_player(playable, n, names, roles, generated)
+
     written = []
-    for name, content in (("index.html", build_index(playable, generated)),
-                          ("team.html", build_team(playable, generated))):
+    for name, content in pages.items():
         (out / name).write_text(content, encoding="utf-8")
         written.append(out / name)
     return written
