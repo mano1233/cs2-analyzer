@@ -29,6 +29,7 @@ import boto3
 import zstandard
 
 import analyze
+import artifacts
 import faceit_stats
 import report
 
@@ -62,6 +63,7 @@ SA = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount")
 
 STATE_KEY = "state/processed.json"
 STATS_KEY = "results/faceit_stats.json"
+IMAGE = os.environ.get("IMAGE_TAG", "")
 RESULTS_KEY = "results/results.json"
 TREND_KEY = "results/trend.csv"
 DEMO_PREFIX = "demos/"
@@ -299,6 +301,29 @@ def sync_stats(state):
     return known
 
 
+def write_artifacts(match, key, stats):
+    """Canonical per-match files. Written before anything derived, so a later rollup or
+    render can be rebuilt from them without the demo - which is deleted after parsing."""
+    match_id = pathlib.Path(key).name.split(".dem")[0]
+    rows = [r for r in (stats or []) if r.get("match_id") == match_id]
+    finished = rows[0].get("finished_at") if rows else None
+    mtime = None
+    try:
+        head = s3().head_object(Bucket=BUCKET, Key=key)
+        mtime = int(head["LastModified"].timestamp())
+    except Exception:
+        pass
+    try:
+        files = artifacts.build(match, match_id, key, stats_rows=rows,
+                                finished_at=finished, mtime=mtime, image=IMAGE)
+        prefix = artifacts.prefix_for(match_id, artifacts.match_date(match, finished, mtime))
+        for name, obj in files.items():
+            put_json(prefix + name, obj)
+        log("  wrote %d artifact file(s) under %s" % (len(files), prefix))
+    except Exception:
+        log("  artifact write failed: %s" % traceback.format_exc().splitlines()[-1])
+
+
 def publish_report(results, stats=()):
     """Render the pages and push them into the ConfigMap the web pod mounts.
 
@@ -365,6 +390,7 @@ def main():
             match = analyze.analyze(dem)
             match["source_key"] = key
             results.append(match)
+            write_artifacts(match, key, stats)
             row = row_for(match, key)
             if row:
                 rows.append(row)

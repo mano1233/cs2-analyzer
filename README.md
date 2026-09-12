@@ -30,6 +30,7 @@ Beyond kills and damage, the things that actually explain lost rounds:
 | `analyze.py` | The parser and all metrics. `analyze(dem)` returns one match; run directly for a per-match and pooled table. |
 | `team.py` | Team report: individual performance, role signals, per-half tables, trade/flash/proximity matrices. |
 | `cluster_run.py` | The CronJob entrypoint. Fetches new FACEIT demos, parses one at a time in scratch, writes results back to R2, publishes the report. |
+| `artifacts.py` | Canonical per-match files: `matches/<date>/<match_id>/{metadata,teams,players/*}.json`. Everything derived is rebuilt from these. |
 | `faceit_stats.py` | Per-match stats from the API - no demo needed. Schema-agnostic: undocumented keys are kept as returned. |
 | `upload_demos.py` | Uploads demos from this machine into the bucket. Runs on your PC, not in the image. |
 | `report.py` | Renders `index.html` (headline metrics + per-match rows) and `team.html` (roles, per-half, trade/flash/distance matrices) from parsed results. |
@@ -79,6 +80,15 @@ CI runs them on every push and pull request, and the image build depends on them
 | `REPORT_DIR` | Where the HTML is rendered before publishing |
 | `REPORT_CONFIGMAP` | ConfigMap to patch with the rendered pages; the web pod mounts it and kubelet re-syncs it, so nothing restarts |
 | `SCRATCH` | Scratch dir for one demo at a time (an `emptyDir` in the CronJob) |
+
+Artifacts per match (canonical, write-once):
+
+```
+matches/<YYYY-MM-DD>/<match_id>/
+  metadata.json          date, map, source, rosters with steamid64, links, provenance
+  teams.json             round table, round metrics, bomb sites, pairing matrices
+  players/<slug>.json    demo counters/rates/scopes and API stats, kept namespaced
+```
 
 Output: `results/results.json` (full per-match, per-player counters),
 `results/trend.csv` (one row per match with the headline metrics) and

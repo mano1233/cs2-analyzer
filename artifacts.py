@@ -1,0 +1,153 @@
+"""Canonical per-match artifacts: the files everything else is rebuilt from.
+
+Layout, one prefix per match:
+
+    matches/<YYYY-MM-DD>/<match_id>/
+      metadata.json          when, where, who, links, provenance
+      teams.json             per-team aggregates and the pairing matrices
+      players/<slug>.json    one file per player, demo and API stats side by side
+
+Date-first so listings sort chronologically. Nickname slugs are unique *within* a
+match so they stay readable here, while stable ids live inside the files - a nickname
+change never breaks history.
+
+Pure: builds a {relative path: object} mapping and writes nothing itself, so the
+caller decides whether that goes to R2 or a local directory, and tests need no bucket.
+"""
+import datetime as dt
+import re
+
+import analyze
+import faceit_stats
+
+SCHEMA_VERSION = 1
+FACEIT_ROOM = "https://www.faceit.com/en/cs2/room/%s"
+SIDE_NAMES = {analyze.T_SIDE: "T", analyze.CT_SIDE: "CT"}
+
+
+def slug(nickname):
+    """Filename-safe, readable, and confined to this match's prefix."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", str(nickname)).strip("-").lower()
+    return cleaned or "player"
+
+
+def match_date(match, finished_at=None, mtime=None):
+    """The match's day, best source first: API finish time, object mtime, today."""
+    for value in (finished_at, mtime):
+        if value:
+            return dt.datetime.fromtimestamp(int(value), dt.timezone.utc).date().isoformat()
+    return dt.date.today().isoformat()
+
+
+def premier_ids(demo_name):
+    """match730_<matchid>_<outcomeid>_<token>.dem carries the three ids a CS2 share
+    code is built from. Stored raw: deriving the code is a separate job, and inventing
+    a link would be worse than admitting there is none."""
+    m = re.match(r"match730_(\d+)_(\d+)_(\d+)", str(demo_name))
+    if not m:
+        return None
+    return {"matchid": m.group(1), "outcomeid": m.group(2), "token": m.group(3)}
+
+
+def source_of(key_or_name):
+    return "premier" if "match730" in str(key_or_name) else "faceit"
+
+
+def build(match, match_id, source_key, stats_rows=(), finished_at=None, mtime=None,
+          image=None, demo_available=None):
+    """Return {relative path: json-able object} for one match."""
+    source = source_of(source_key)
+    date = match_date(match, finished_at, mtime)
+    steamids = match.get("steamids", {})
+    players = match.get("players", {})
+    round_table = match.get("round_table", [])
+
+    # Split by the side held in round 1. Per-player t_rounds/ct_rounds cannot do this:
+    # sides swap at the half, so everyone is ~12/12 and all ten land on one team.
+    started = match.get("started_side", {})
+    by_team = {}
+    for name in players:
+        side = started.get(name)
+        if side is None:      # joined late; put them with whichever side they played more
+            c = players[name]
+            side = analyze.T_SIDE if c.get("t_rounds", 0) >= c.get("ct_rounds", 0) else analyze.CT_SIDE
+        by_team.setdefault(int(side), []).append(name)
+
+    stack = set(match.get("stack", []))
+    faceit_by_player = {row.get("nickname"): row for row in stats_rows or ()}
+
+    metadata = {
+        "schema_version": SCHEMA_VERSION,
+        "match_id": match_id,
+        "date": date,
+        "finished_at": int(finished_at) if finished_at else None,
+        "map": match.get("map"),
+        "source": source,
+        "rounds": match.get("rounds"),
+        "demo": {
+            "file": match.get("demo"),
+            "object": source_key,
+            "faceit_url": FACEIT_ROOM % match_id if source == "faceit" else None,
+            # DEV-59 decides availability; unknown until then rather than assumed true.
+            "available": demo_available,
+            "checked_at": None,
+        },
+        "premier_ids": premier_ids(match.get("demo")),
+        "teams": [
+            {
+                "started_as": SIDE_NAMES.get(side, str(side)),
+                "is_our_stack": bool(stack & set(members)),
+                "players": [
+                    {"nickname": n, "steamid64": steamids.get(n), "in_stack": n in stack}
+                    for n in sorted(members)
+                ],
+                "rounds_won": max((int(players[n].get("rounds_won", 0)) for n in members), default=0),
+            }
+            for side, members in sorted(by_team.items())
+        ],
+        "parsed_with": {"image": image, "schema": SCHEMA_VERSION,
+                        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")},
+    }
+
+    teams = {
+        "match_id": match_id,
+        "round_metrics": analyze.round_metrics([match]),
+        "sites": analyze.plant_sites([match]),
+        "round_table": round_table,
+        "pairs": {
+            "traded_for": match.get("traded_for", {}),
+            "flash_conv": match.get("flash_conv", {}),
+            "prox_sum": match.get("prox_sum", {}),
+            "prox_n": match.get("prox_n", {}),
+        },
+        "economy_thresholds": {"eco_below": analyze.ECO_MAX, "full_above": analyze.FORCE_MAX},
+    }
+
+    out = {"metadata.json": metadata, "teams.json": teams}
+    for name, counters in players.items():
+        api_row = faceit_by_player.get(name)
+        out["players/%s.json" % slug(name)] = {
+            "match_id": match_id,
+            "nickname": name,
+            "steamid64": steamids.get(name),
+            "in_stack": name in stack,
+            # Sources stay namespaced: FACEIT's "flash success" and our "flash hit"
+            # measure different things, so they are never merged into one number.
+            "demo": {
+                "counters": counters,
+                "rates": analyze.rates(counters),
+                "scopes": {scope: analyze.scope_rates(counters, prefix)
+                           for scope, prefix in (("all", ""), ("t", "t_"), ("ct", "ct_"),
+                                                 ("h1", "h1_"), ("h2", "h2_"), ("ot", "ot_"))},
+                "role_signals": analyze.role_signals(counters),
+            },
+            "faceit": {
+                "stats": api_row.get("stats") if api_row else None,
+                "curated": dict(faceit_stats.curated(api_row["stats"])) if api_row else None,
+            },
+        }
+    return out
+
+
+def prefix_for(match_id, date):
+    return "matches/%s/%s/" % (date, match_id)

@@ -97,6 +97,12 @@ def analyze(dem):
     T["r"] = np.searchsorted(freeze, T.tick.to_numpy())
     team_of = {(r, n): int(t) for r, n, t in zip(T.r, T.name, T.team_num)}
     names = sorted(set(T.name))
+    # Stable ids as strings: uint64 from parse_ticks is exact, and a string survives
+    # JSON round-trips that would quietly damage a 17-digit number as a float.
+    steamids = {n: str(s) for n, s in zip(T.name, T.steamid)}
+    # The side each player held in the first round. Sides swap at the half, so
+    # per-player round counts are ~12/12 and cannot separate the two teams.
+    started_side = {n: team_of[(0, n)] for n in names if (0, n) in team_of}
 
     for c in ("attacker_team_num", "user_team_num", "assister_team_num"):
         D[c] = D[c].astype(float)
@@ -343,7 +349,7 @@ def analyze(dem):
 
     pack = lambda m: {a: dict(b) for a, b in m.items()}
     return {"demo": dem.name, "map": mapname, "rounds": n_rounds, "stack": stack,
-            "round_table": rounds,
+            "round_table": rounds, "steamids": steamids, "started_side": started_side,
             "players": out, "traded_for": pack(traded_for), "flash_conv": pack(flash_conv),
             "prox_sum": pack(prox_sum), "prox_n": pack(prox_n)}
 
