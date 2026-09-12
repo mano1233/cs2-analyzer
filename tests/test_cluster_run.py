@@ -84,6 +84,81 @@ class TestPublishGuards:
         assert any("no service account" in m for m in logged)
 
 
+class TestDemoKeys:
+    """What the run is willing to hand to the parser."""
+
+    def listing(self, monkeypatch, keys):
+        monkeypatch.setattr(cluster_run, "list_keys", lambda prefix: keys)
+
+    def test_the_folder_marker_is_not_a_demo(self, monkeypatch):
+        """Creating the folder in the R2 console leaves a zero-byte "demos/" object.
+        The parser panics in Rust on an empty file, which killed the whole run."""
+        self.listing(monkeypatch, ["demos/", "demos/1-abc.dem.zst"])
+        assert cluster_run.demo_keys() == ["demos/1-abc.dem.zst"]
+
+    def test_strays_under_the_prefix_are_ignored(self, monkeypatch):
+        self.listing(monkeypatch, ["demos/notes.txt", "demos/.keep", "demos/1-abc.dem"])
+        assert cluster_run.demo_keys() == ["demos/1-abc.dem"]
+
+    @pytest.mark.parametrize("name", ["1-abc.dem", "1-abc.dem.zst", "1-abc.dem.bz2"])
+    def test_every_demo_form_we_upload_is_accepted(self, monkeypatch, name):
+        self.listing(monkeypatch, ["demos/" + name])
+        assert cluster_run.demo_keys() == ["demos/" + name]
+
+
+class TestOneBadDemo:
+    """A demo the parser cannot read must cost that demo, not the run."""
+
+    def run_with(self, monkeypatch, tmp_path, failure):
+        written = {}
+        monkeypatch.setattr(cluster_run, "SCRATCH", tmp_path)
+        monkeypatch.setattr(cluster_run, "get_json", lambda key, default: default)
+        monkeypatch.setattr(cluster_run, "put_json", lambda key, obj: written.__setitem__(key, obj))
+        monkeypatch.setattr(cluster_run, "fetch_faceit", lambda state: None)
+        monkeypatch.setattr(cluster_run, "sync_stats", lambda state: [])
+        monkeypatch.setattr(cluster_run, "demo_keys", lambda: ["demos/bad.dem", "demos/good.dem"])
+        monkeypatch.setattr(cluster_run, "append_trend", lambda rows: None)
+        monkeypatch.setattr(cluster_run, "write_rollup", lambda r, s: None)
+        monkeypatch.setattr(cluster_run, "publish_report", lambda r, s: None)
+        monkeypatch.setattr(cluster_run, "write_artifacts", lambda m, k, s: None)
+
+        class FakeS3:
+            def download_file(self, bucket, key, path):
+                pathlib.Path(path).write_bytes(b"not really a demo")
+
+        monkeypatch.setattr(cluster_run, "s3", lambda: FakeS3())
+
+        def parse(dem):
+            if "bad" in str(dem):
+                raise failure
+            return {"demo": dem.name, "map": "de_nuke", "rounds": 24, "stack": [],
+                    "players": {}}
+
+        monkeypatch.setattr(cluster_run.analyze, "analyze", parse)
+        return cluster_run.main(), written
+
+    def test_a_rust_panic_does_not_end_the_run(self, monkeypatch, tmp_path):
+        """demoparser2 panics rather than raising on a malformed demo, and pyo3 hands
+        that back as a PanicException - which is a BaseException, not an Exception."""
+        class PanicException(BaseException):
+            pass
+
+        code, written = self.run_with(monkeypatch, tmp_path, PanicException("range end index 16"))
+        assert code == 0
+        assert len(written[cluster_run.RESULTS_KEY]) == 1      # the good one still landed
+        assert written[cluster_run.STATE_KEY]["demos"] == ["demos/good.dem"]
+
+    def test_an_ordinary_error_behaves_the_same(self, monkeypatch, tmp_path):
+        code, written = self.run_with(monkeypatch, tmp_path, ValueError("corrupt"))
+        assert code == 0
+        assert len(written[cluster_run.RESULTS_KEY]) == 1
+
+    def test_a_stop_signal_is_still_a_stop_signal(self, monkeypatch, tmp_path):
+        """Catching BaseException must not swallow the interpreter shutting down."""
+        with pytest.raises(KeyboardInterrupt):
+            self.run_with(monkeypatch, tmp_path, KeyboardInterrupt())
+
+
 class TestConfig:
     def test_window_is_three_weeks_by_default(self):
         assert cluster_run.WINDOW_DAYS == 21

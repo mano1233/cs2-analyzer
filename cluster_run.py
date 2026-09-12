@@ -113,6 +113,17 @@ def list_keys(prefix):
         token = page.get("NextContinuationToken")
 
 
+def demo_keys():
+    """Demos under the prefix, and nothing else.
+
+    Creating a folder in the R2 console leaves a zero-byte object named "demos/". Handed
+    to the parser that is an empty file, and the parser does not raise on one - it panics
+    in Rust, which arrives as a PanicException and takes the process with it.
+    """
+    return [k for k in list_keys(DEMO_PREFIX)
+            if k != DEMO_PREFIX and k.endswith((".dem", ".dem.zst", ".dem.bz2"))]
+
+
 def faceit(path):
     req = urllib.request.Request(FACEIT_API + path, headers={"Authorization": "Bearer " + API_KEY})
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -397,7 +408,7 @@ def main():
     put_json(STATE_KEY, state)   # persist match ids even if parsing later fails
     stats = sync_stats(state)
 
-    pending = [k for k in list_keys(DEMO_PREFIX) if k not in seen][:MAX_PER_RUN]
+    pending = [k for k in demo_keys() if k not in seen][:MAX_PER_RUN]
     log("%d demo(s) to parse" % len(pending))
 
     rows = []
@@ -421,7 +432,13 @@ def main():
             else:
                 log("  %s not in this demo" % analyze.ME)
             seen.add(key)
-        except Exception:
+        except BaseException as e:
+            # Not `except Exception`: demoparser2 is a Rust extension, and a malformed
+            # demo panics rather than raising. pyo3 surfaces that as a PanicException,
+            # which inherits from BaseException - so one bad file used to kill the run
+            # before any of the matches parsed before it were saved.
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
             log("failed on %s\n%s" % (key, traceback.format_exc()))
         finally:
             for f in (archive, dem):
