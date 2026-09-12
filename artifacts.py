@@ -20,7 +20,9 @@ import re
 import analyze
 import faceit_stats
 
-SCHEMA_VERSION = 1
+# 2: pairs gained tradeable and death_dist_*, and the economy thresholds grew into the
+# full conventions block - every threshold the numbers in this file depend on.
+SCHEMA_VERSION = 2
 FACEIT_ROOM = "https://www.faceit.com/en/cs2/room/%s"
 SIDE_NAMES = {analyze.T_SIDE: "T", analyze.CT_SIDE: "CT"}
 
@@ -120,11 +122,25 @@ def build(match, match_id, source_key, stats_rows=(), finished_at=None, mtime=No
         "round_table": round_table,
         "pairs": {
             "traded_for": match.get("traded_for", {}),
+            # The denominator for traded_for: chances, not just conversions.
+            "tradeable": match.get("tradeable", {}),
             "flash_conv": match.get("flash_conv", {}),
             "prox_sum": match.get("prox_sum", {}),
             "prox_n": match.get("prox_n", {}),
+            "death_dist_sum": match.get("death_dist_sum", {}),
+            "death_dist_n": match.get("death_dist_n", {}),
         },
-        "economy_thresholds": {"eco_below": analyze.ECO_MAX, "full_above": analyze.FORCE_MAX},
+        # Every threshold this file's numbers depend on, so a page can say what it
+        # assumed instead of presenting a convention as a measurement.
+        "conventions": {
+            "eco_below": analyze.ECO_MAX,
+            "full_above": analyze.FORCE_MAX,
+            "trade_window_s": analyze.TRADE_WINDOW / analyze.TR,
+            "trade_range_units": analyze.TRADE_RANGE,
+            "trade_range_m": round(analyze.TRADE_RANGE * analyze.UNIT_M, 1),
+            "effective_blind_s": analyze.EFFECTIVE_BLIND,
+            "moving_above_u_per_s": analyze.MOVING,
+        },
         # Everyone else, pooled: keeps the comparison baseline without writing a file
         # per opponent we will never look at individually.
         "lobby_baseline": analyze.rates(analyze.pool(

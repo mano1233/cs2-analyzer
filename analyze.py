@@ -46,6 +46,12 @@ T_SIDE, CT_SIDE = 2, 3
 ECO_MAX, FORCE_MAX = 5000, 20000
 BUCKETS = ("eco", "force", "full")
 
+# How close a living teammate must be for a trade to have been available. A convention,
+# like the economy thresholds: 1000 units is ~19 m, about the distance from which a
+# teammate can actually punish the kill. Used as the denominator for trade rates, so a
+# player is judged on chances taken rather than raw counts.
+TRADE_RANGE = 1000.0
+
 
 def norm(w):
     w = str(w).lower()
@@ -93,7 +99,7 @@ def analyze(dem):
         df["t"] = (df.tick - freeze[df.r.to_numpy()]) / TR
         return df
 
-    D = get("player_death", player=["team_num", "inventory"])
+    D = get("player_death", player=["team_num", "inventory", "X", "Y"])
     H = get("player_hurt", player=["team_num"])
     F = get("weapon_fire", player=["velocity_X", "velocity_Y"])
     B = get("player_blind", player=["team_num"])
@@ -193,16 +199,42 @@ def analyze(dem):
             if k.attacker_name:
                 flash_conv[b.attacker_name][k.attacker_name] += 1
 
+    # tradeable[mate][victim]: when victim died, mate was alive and within trade range
+    # OF THE KILLER - being near the body is not the same as being able to punish the
+    # player who made it. Same orientation as traded_for (row acts on column), so
+    # traded_for over tradeable is directly "of the chances A had to trade B, how many".
+    #
+    # It is a range test, not a line-of-sight test: we have positions, not map geometry,
+    # so a teammate 15 m away through a wall counts. Read it as opportunity, not duty.
+    # death_dist_* is the separate question of team spacing - how far apart we die.
+    tradeable = defaultdict(lambda: defaultdict(int))
+    death_dist_sum = defaultdict(lambda: defaultdict(float))
+    death_dist_n = defaultdict(lambda: defaultdict(int))
+    trade_available = {}     # (victim, tick) -> was anyone close enough to punish it
+    nearest_mate = {}        # (victim, tick) -> distance to the closest living teammate
+
     samples = []
     for r in range(n_rounds):
         t = freeze[r] + SAMPLE_EVERY
         while t < end_ticks[r]:
             samples.append(int(t))
             t += SAMPLE_EVERY
-    if samples:
-        S = p.parse_ticks(["X", "Y", "team_num", "health"], ticks=samples)
+
+    # One parse for both: it is the expensive call, and the sampled ticks and the death
+    # ticks want the same four columns. The victim's own position comes from the death
+    # event instead - they are already at 0 health here, so this frame does not hold it.
+    sample_set = set(samples)
+    death_set = {int(x) for x in D.tick}
+    if sample_set or death_set:
+        S = p.parse_ticks(["X", "Y", "team_num", "health"], ticks=sorted(sample_set | death_set))
         S = S[S.health > 0]
+        alive_at = {}
         for tick, grp in S.groupby("tick"):
+            tick = int(tick)
+            if tick in death_set:
+                alive_at[tick] = grp
+            if tick not in sample_set:
+                continue
             for team, side in grp.groupby("team_num"):
                 rows = list(zip(side.name, side.X.astype(float), side.Y.astype(float)))
                 for i in range(len(rows)):
@@ -214,6 +246,30 @@ def analyze(dem):
                         prox_n[a][b] += 1
                         prox_sum[b][a] += dist
                         prox_n[b][a] += 1
+
+        for d in D.itertuples(index=False):
+            grp = alive_at.get(int(d.tick))
+            if grp is None or d.user_X != d.user_X:     # no frame, or no position
+                continue
+            victim = d.user_name
+            # A kill by the world (fall, bomb) has no killer to punish, so no trade was
+            # ever on offer and the death is left out of the denominator entirely.
+            killer = (float(d.attacker_X), float(d.attacker_Y)) if (
+                d.attacker_name and d.attacker_X == d.attacker_X) else None
+            mates = grp[(grp.team_num == d.user_team_num) & (grp.name != victim)]
+            nearest, in_range = None, False
+            for mate, mx, my in zip(mates.name, mates.X.astype(float), mates.Y.astype(float)):
+                apart = float(np.hypot(float(d.user_X) - mx, float(d.user_Y) - my))
+                death_dist_sum[victim][mate] += apart
+                death_dist_n[victim][mate] += 1
+                nearest = apart if nearest is None else min(nearest, apart)
+                if killer is None:
+                    continue
+                if float(np.hypot(killer[0] - mx, killer[1] - my)) <= TRADE_RANGE:
+                    tradeable[mate][victim] += 1
+                    in_range = True
+            nearest_mate[(victim, int(d.tick))] = nearest
+            trade_available[(victim, int(d.tick))] = in_range
 
     # ---- per-player counters -------------------------------------------------
     # Everything countable is computed through one scoped bundle, so overall, per
@@ -256,7 +312,7 @@ def analyze(dem):
             s["pistol_kills"] = int(w.isin(PISTOLS).sum())
 
         # Per-event flags once, summed per scope afterwards.
-        traded_rounds, held_util, trade_kill_rounds = [], [], []
+        traded_rounds, held_util, trade_kill_rounds, tradeable_rounds = [], [], [], []
         for _, d in deaths.iterrows():
             revenge = D[(D.user_name == d.attacker_name) & (D.tick > d.tick)
                         & (D.tick <= d.tick + TRADE_WINDOW) & (D.attacker_team_num == d.user_team_num)]
@@ -264,6 +320,11 @@ def analyze(dem):
             held_util.append((d.r, n_util(d.user_inventory)))
             s["died_with_util_rounds"] += int(n_util(d.user_inventory) > 0)
             s["util_lost_on_death"] += n_util(d.user_inventory)
+            tradeable_rounds.append((d.r, bool(trade_available.get((name, int(d.tick))))))
+            near = nearest_mate.get((name, int(d.tick)))
+            if near is not None:
+                s["death_nearest_sum"] += near
+                s["death_nearest_n"] += 1
         for _, k in kills.iterrows():
             avenged = D[(D.attacker_name == k.user_name) & (D.tick < k.tick)
                         & (D.tick >= k.tick - TRADE_WINDOW) & (D.user_team_num == k.attacker_team_num)]
@@ -325,6 +386,7 @@ def analyze(dem):
                                         if r in rs and ev == "flashbang_detonate")
             s[prefix + "flashes_hit"] = int(eff_flashes[eff_flashes.r.isin(rs)].tick.nunique())
             s[prefix + "deaths_traded"] = sum(1 for r, ok in traded_rounds if r in rs and ok)
+            s[prefix + "deaths_tradeable"] = sum(1 for r, ok in tradeable_rounds if r in rs and ok)
             s[prefix + "trade_kills"] = sum(1 for r, ok in trade_kill_rounds if r in rs and ok)
 
         bundle("", range(n_rounds))
@@ -358,7 +420,9 @@ def analyze(dem):
     return {"demo": dem.name, "map": mapname, "rounds": n_rounds, "stack": stack,
             "round_table": rounds, "steamids": steamids, "started_side": started_side,
             "players": out, "traded_for": pack(traded_for), "flash_conv": pack(flash_conv),
-            "prox_sum": pack(prox_sum), "prox_n": pack(prox_n)}
+            "prox_sum": pack(prox_sum), "prox_n": pack(prox_n),
+            "tradeable": pack(tradeable), "death_dist_sum": pack(death_dist_sum),
+            "death_dist_n": pack(death_dist_n)}
 
 
 def rates(s):
@@ -372,6 +436,11 @@ def rates(s):
         "HS%": 100 * div(s["hs_kills"], s["kills"]),
         "open W/L": f'{int(s["open_won"])}/{int(s["open_lost"])}',
         "traded death%": 100 * div(s["deaths_traded"], s["deaths"]),
+        # The honest version: of the deaths a teammate was actually in range to punish,
+        # how many were. The raw percentage above punishes you for dying alone twice.
+        "traded death% (of available)": 100 * div(s["deaths_traded"], s["deaths_tradeable"]),
+        "trade available%": 100 * div(s["deaths_tradeable"], s["deaths"]),
+        "nearest mate at death (m)": div(s["death_nearest_sum"], s["death_nearest_n"]) * UNIT_M,
         "trade kills/r": s["trade_kills"] / r,
         "accuracy%": 100 * div(s["hits"], s["shots"]),
         "moving 1st shot%": 100 * div(s["first_shots_moving"], s["first_shots"]),
@@ -385,6 +454,9 @@ def rates(s):
         "enemies blinded/flash": div(s["enemy_blinds"], s["flashes"]),
         "team blinds/flash": div(s["team_blinds"], s["flashes"]),
         "flash->kill": int(s["flash_kills"]),
+        # Per flash thrown, so someone who throws two a round is not automatically
+        # "better at flashing" than someone who throws one and follows it up.
+        "flash->kill/flash": div(s["flash_kills"], s["flashes"]),
         "flash assists": int(s["flash_assists"]),
         "util dmg/r": s["util_damage"] / r,
         "util before 1st kill%": 100 * div(s["util_before_contact"], s["util_thrown"]),
@@ -410,6 +482,9 @@ def scope_rates(s, prefix=""):
         "util thrown/r": s[prefix + "util_thrown"] / r,
         "flash hit%": 100 * div(s[prefix + "flashes_hit"], s[prefix + "flashes"]),
         "traded death%": 100 * div(s[prefix + "deaths_traded"], s[prefix + "deaths"]),
+        "traded death% (of available)": 100 * div(s[prefix + "deaths_traded"],
+                                              s[prefix + "deaths_tradeable"]),
+        "trade available%": 100 * div(s[prefix + "deaths_tradeable"], s[prefix + "deaths"]),
         "trade kills/r": s[prefix + "trade_kills"] / r,
     }
 
@@ -487,6 +562,10 @@ def role_signals(s):
         "trade kills/r": s["trade_kills"] / r,
         "avg death time (s)": div(s["death_time_sum"], s["deaths"]),
         "survival%": 100 * (1 - div(s["deaths"], r)),
+        # Anchors die alone by design: they hold a site while the rest of the team is
+        # elsewhere. That reads as a low share of deaths with a teammate in range.
+        "trade available%": 100 * div(s["deaths_tradeable"], s["deaths"]),
+        "CT rounds": int(s["ct_rounds"]),
     }
 
 
@@ -494,7 +573,12 @@ def assign_roles(sig):
     """Roles from measured behaviour. The rule is deliberately simple and stated in
     the output, so a player can disagree with it rather than be labelled silently."""
     names = list(sig)
-    med = lambda key: sorted(sig[n][key] for n in names)[len(names) // 2]
+    # NaN sorts unpredictably and a player with no deaths yet has NaN everywhere, so
+    # the median is taken over the values that actually exist.
+    def med(key):
+        vals = sorted(v for v in (sig[n][key] for n in names) if v == v)
+        return vals[len(vals) // 2] if vals else float("nan")
+
     top_entry = max(sig[n]["T open/r"] for n in names)
     roles = {}
     for n in names:
@@ -505,6 +589,9 @@ def assign_roles(sig):
             roles[n] = "Entry"
         elif g["util/r"] >= med("util/r") and g["smokes+flashes/r"] >= med("smokes+flashes/r"):
             roles[n] = "Support"
+        elif (g["CT rounds"] >= 5 and g["CT open/r"] >= med("CT open/r")
+              and g["trade available%"] <= med("trade available%")):
+            roles[n] = "CT anchor"
         elif g["avg death time (s)"] >= med("avg death time (s)") and g["first_contact/r"] <= med("first_contact/r"):
             roles[n] = "Lurk / late"
         else:
@@ -515,15 +602,22 @@ def assign_roles(sig):
 ROLE_RULE = ("AWP if at least 20% of kills come with the AWP; else Entry for the highest "
              "T-side first-contact rate (and at least 0.15/round); else Support if both "
              "utility per round and smokes+flashes per round are at or above the team "
-             "median; else Lurk/late for dying later than the median with below-median "
-             "first contact; else Rifler.")
+             "median; else CT anchor for taking first contact on CT at least as often as "
+             "the median while dying alone more than the median; else Lurk/late for dying "
+             "later than the median with below-median first contact; else Rifler. One role "
+             "per player, so a player who anchors on CT and lurks on T gets whichever fires "
+             "first.")
 
 ROLE_KPIS = {
-    "Entry": ["open W/L", "traded death%", "moving 1st shot%", "accuracy%", "ADR"],
-    "Support": ["util thrown/r", "flash hit% (>=1 enemy)", "flash->kill", "util before 1st kill%",
-                "died holding util%", "avg util time T (s)"],
+    "Entry": ["open W/L", "traded death% (of available)", "trade available%",
+              "moving 1st shot%", "accuracy%", "ADR"],
+    "Support": ["util thrown/r", "flash hit% (>=1 enemy)", "flash->kill/flash",
+                "util before 1st kill%", "died holding util%", "avg util time T (s)"],
     "AWP": ["open W/L", "accuracy%", "ADR", "K/D"],
-    "Lurk / late": ["trade kills/r", "traded death%", "K/D", "ADR"],
+    # An anchor is judged on trading time for damage, not on being traded - nobody is
+    # there to trade them.
+    "CT anchor": ["ADR", "K/D", "nearest mate at death (m)", "util thrown/r", "accuracy%"],
+    "Lurk / late": ["trade kills/r", "traded death% (of available)", "K/D", "ADR"],
     "Rifler": ["ADR", "HS%", "accuracy%", "trade kills/r", "K/D"],
 }
 
@@ -620,29 +714,36 @@ def plant_sites(matches, max_spread=600.0):
     return out
 
 
-def pair_matrix(matches, key, names, mean=False):
-    """Pair values over the roster: rows act on columns. mean=True averages prox_sum
-    over prox_n (metres); otherwise counts are summed."""
+def pair_matrix(matches, key, names, mean=False, over=None, scale=1.0):
+    """Pair values over the roster: rows act on columns.
+
+    `over` names a second matrix to divide by, which is what turns a count into a rate:
+    traded_for over tradeable answers "of the deaths this player could have traded, how
+    many did they". A pair whose denominator is zero comes back as None rather than 0 -
+    nothing happened there, so there is nothing to score. `mean=True` is the proximity
+    shorthand: prox_sum over prox_n, in metres.
+    """
+    if mean:
+        key, over, scale = "prox_sum", "prox_n", UNIT_M
     tot = defaultdict(lambda: defaultdict(float))
     cnt = defaultdict(lambda: defaultdict(float))
     for m in matches:
-        for a, row in m.get("prox_sum" if mean else key, {}).items():
+        for a, row in m.get(key, {}).items():
             for b, v in row.items():
                 tot[a][b] += v
-        if mean:
-            for a, row in m.get("prox_n", {}).items():
-                for b, v in row.items():
-                    cnt[a][b] += v
+        for a, row in m.get(over or "", {}).items():
+            for b, v in row.items():
+                cnt[a][b] += v
     out = {}
     for a in names:
         out[a] = {}
         for b in names:
             if a == b:
                 out[a][b] = None
-            elif mean:
-                out[a][b] = (tot[a][b] / cnt[a][b] * UNIT_M) if cnt[a][b] else None
+            elif over:
+                out[a][b] = (tot[a][b] / cnt[a][b] * scale) if cnt[a][b] else None
             else:
-                out[a][b] = tot[a][b]
+                out[a][b] = tot[a][b] * scale
     return out
 
 if __name__ == "__main__":

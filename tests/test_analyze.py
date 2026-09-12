@@ -87,6 +87,41 @@ class TestRates:
         assert math.isnan(r["flash hit% (>=1 enemy)"])
 
 
+class TestOpportunityRates:
+    """Counts divided by the chances that existed, not by the chances we wish existed."""
+
+    def test_trades_are_scored_against_the_deaths_that_could_be_traded(self):
+        r = analyze.rates(counters(deaths=60, deaths_traded=12, deaths_tradeable=20))
+        assert r["traded death%"] == pytest.approx(20.0)          # of every death
+        assert r["traded death% (of available)"] == pytest.approx(60.0)
+        assert r["trade available%"] == pytest.approx(100 * 20 / 60)
+
+    def test_dying_alone_every_time_is_nan_not_zero(self):
+        """Nobody was ever in range, so there is no conversion rate to report - 0%
+        would read as 'the team never traded him', which is a different accusation."""
+        r = analyze.rates(counters(deaths=60, deaths_traded=0, deaths_tradeable=0))
+        assert math.isnan(r["traded death% (of available)"])
+        assert r["trade available%"] == pytest.approx(0.0)
+
+    def test_nearest_teammate_at_death_is_reported_in_metres(self):
+        r = analyze.rates(counters(death_nearest_sum=2000.0, death_nearest_n=4))
+        assert r["nearest mate at death (m)"] == pytest.approx(500.0 * analyze.UNIT_M)
+
+    def test_flash_conversions_are_per_flash_thrown(self):
+        """Throwing twice as many flashes for the same kills is not twice as good."""
+        few = analyze.rates(counters(flashes=10, flash_kills=3))
+        many = analyze.rates(counters(flashes=40, flash_kills=3))
+        assert few["flash->kill"] == many["flash->kill"] == 3
+        assert few["flash->kill/flash"] == pytest.approx(0.3)
+        assert many["flash->kill/flash"] == pytest.approx(0.075)
+
+    def test_scope_rates_carry_the_same_denominator(self):
+        s = counters(ct_rounds=12, ct_deaths=10, ct_deaths_traded=3, ct_deaths_tradeable=5)
+        ct = analyze.scope_rates(s, "ct_")
+        assert ct["traded death% (of available)"] == pytest.approx(60.0)
+        assert ct["trade available%"] == pytest.approx(50.0)
+
+
 class TestScopes:
     def test_scope_rates_read_the_prefixed_counters(self):
         s = counters(h1_rounds=12, h1_kills=10, h1_deaths=5, h1_damage=1200.0)
@@ -162,6 +197,50 @@ class TestRoles:
         }
         assert analyze.assign_roles(sig)["sup"] == "Support"
 
+    def test_ct_first_contact_while_dying_alone_is_an_anchor(self):
+        """An anchor meets the execute first and has nobody in range when it kills
+        them. Without this category they were being filed as riflers."""
+        sig = {
+            "anchor": analyze.role_signals(counters(ct_open_won=10, ct_open_lost=20,
+                                                    deaths_tradeable=5, deaths=60,
+                                                    t_open_won=0, t_open_lost=0,
+                                                    util_thrown=40, smokes=5, flashes=5)),
+            "a": analyze.role_signals(counters(ct_open_won=1, ct_open_lost=1,
+                                               deaths_tradeable=40, deaths=60)),
+            "b": analyze.role_signals(counters(ct_open_won=1, ct_open_lost=2,
+                                               deaths_tradeable=45, deaths=60,
+                                               t_open_won=20, t_open_lost=20)),
+        }
+        assert analyze.assign_roles(sig)["anchor"] == "CT anchor"
+
+    def test_a_player_who_is_always_traded_is_not_an_anchor(self):
+        """Same CT first-contact rate, but he dies with the team - that is an opener,
+        not someone holding a site alone."""
+        sig = {
+            "with_team": analyze.role_signals(counters(ct_open_won=10, ct_open_lost=20,
+                                                       deaths_tradeable=55, deaths=60,
+                                                       t_open_won=0, t_open_lost=0,
+                                                       util_thrown=40, smokes=5, flashes=5)),
+            "a": analyze.role_signals(counters(ct_open_won=1, ct_open_lost=1,
+                                               deaths_tradeable=10, deaths=60)),
+            "b": analyze.role_signals(counters(ct_open_won=1, ct_open_lost=2,
+                                               deaths_tradeable=12, deaths=60,
+                                               t_open_won=20, t_open_lost=20)),
+        }
+        assert analyze.assign_roles(sig)["with_team"] != "CT anchor"
+
+    def test_a_player_with_no_ct_rounds_is_not_an_anchor(self):
+        sig = {n: analyze.role_signals(counters(ct_rounds=0, ct_open_won=0, ct_open_lost=0))
+               for n in "abc"}
+        assert "CT anchor" not in analyze.assign_roles(sig).values()
+
+    def test_roles_survive_players_with_nothing_measured_yet(self):
+        """A fresh player is NaN everywhere; the median must not become NaN for all."""
+        sig = {"played": analyze.role_signals(counters()),
+               "fresh": analyze.role_signals({"rounds": 0})}
+        roles = analyze.assign_roles(sig)
+        assert set(roles) == {"played", "fresh"}
+
     def test_every_player_gets_a_role(self):
         sig = {n: analyze.role_signals(counters()) for n in "abcde"}
         roles = analyze.assign_roles(sig)
@@ -189,6 +268,18 @@ class TestPairMatrix:
 
     def test_pair_never_sampled_is_none(self):
         m = analyze.pair_matrix([match(["a", "b"], {})], "prox_sum", ["a", "b"], mean=True)
+        assert m["a"]["b"] is None
+
+    def test_over_turns_a_count_into_a_conversion_rate(self):
+        """b died 10 times with a in range of the killer; a traded 4 of them."""
+        ms = [match(["a", "b"], {}, traded_for={"a": {"b": 4}}, tradeable={"a": {"b": 10}})]
+        m = analyze.pair_matrix(ms, "traded_for", ["a", "b"], over="tradeable", scale=100)
+        assert m["a"]["b"] == pytest.approx(40.0)
+
+    def test_pair_with_no_opportunities_is_none_not_zero(self):
+        """a was never near the player who killed b. That is not a failure to trade."""
+        ms = [match(["a", "b"], {}, traded_for={}, tradeable={})]
+        m = analyze.pair_matrix(ms, "traded_for", ["a", "b"], over="tradeable")
         assert m["a"]["b"] is None
 
 
