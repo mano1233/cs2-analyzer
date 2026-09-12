@@ -4,6 +4,8 @@ The parts that talk to R2, FACEIT and the Kubernetes API are not exercised here 
 are one call each and mocking them tests the mock. What is worth testing is the logic
 that decides what gets written and when publishing is refused.
 """
+import csv
+import io
 import pathlib
 
 import pytest
@@ -157,6 +159,75 @@ class TestOneBadDemo:
         """Catching BaseException must not swallow the interpreter shutting down."""
         with pytest.raises(KeyboardInterrupt):
             self.run_with(monkeypatch, tmp_path, KeyboardInterrupt())
+
+
+class TestTrendIsKeyed:
+    def row(self, demo, **over):
+        return dict({f: "" for f in cluster_run.TREND_FIELDS}, demo=demo, **over)
+
+    def test_first_write_gets_a_header(self):
+        out = cluster_run.merge_trend("", [self.row("a.dem", map="de_nuke")])
+        assert out.splitlines()[0] == ",".join(cluster_run.TREND_FIELDS)
+        assert len(out.strip().splitlines()) == 2
+
+    def test_a_new_demo_is_added(self):
+        first = cluster_run.merge_trend("", [self.row("a.dem")])
+        out = cluster_run.merge_trend(first, [self.row("b.dem")])
+        assert len(out.strip().splitlines()) == 3
+
+    def test_reparsing_corrects_the_row_instead_of_adding_one(self):
+        """Otherwise a metric fix leaves two rows making different claims about the
+        same match, and the trend line double-counts it."""
+        first = cluster_run.merge_trend("", [self.row("a.dem", adr="70.0")])
+        out = cluster_run.merge_trend(first, [self.row("a.dem", adr="81.5")])
+        body = out.strip().splitlines()
+        assert len(body) == 2
+        assert "81.5" in body[1] and "70.0" not in out
+
+    def test_order_is_stable_so_the_trend_reads_oldest_first(self):
+        out = cluster_run.merge_trend("", [self.row("a.dem"), self.row("b.dem")])
+        out = cluster_run.merge_trend(out, [self.row("a.dem", map="de_nuke")])
+        demos = [r["demo"] for r in csv.DictReader(io.StringIO(out))]
+        assert demos == ["a.dem", "b.dem"]
+
+
+class TestResultsAreKeyed:
+    """Re-parsing a demo replaces its entry. Appending left results.json holding
+    three schema generations at once, which made the aggregates disagree."""
+
+    def test_a_reparse_replaces_rather_than_duplicates(self, monkeypatch, tmp_path):
+        stored = [{"demo": "a.dem", "source_key": "demos/a.dem", "map": "de_nuke",
+                   "rounds": 24, "stack": [], "players": {}}]
+        written = {}
+        monkeypatch.setattr(cluster_run, "SCRATCH", tmp_path)
+        monkeypatch.setattr(cluster_run, "get_json",
+                            lambda key, default: stored if key == cluster_run.RESULTS_KEY else default)
+        monkeypatch.setattr(cluster_run, "put_json", lambda key, obj: written.__setitem__(key, obj))
+        monkeypatch.setattr(cluster_run, "fetch_faceit", lambda state: None)
+        monkeypatch.setattr(cluster_run, "sync_stats", lambda state: [])
+        monkeypatch.setattr(cluster_run, "demo_keys", lambda: ["demos/a.dem"])
+        monkeypatch.setattr(cluster_run, "append_trend", lambda rows: None)
+        monkeypatch.setattr(cluster_run, "write_rollup", lambda r, s: None)
+        monkeypatch.setattr(cluster_run, "publish_report", lambda r, s: None)
+        monkeypatch.setattr(cluster_run, "write_artifacts", lambda m, k, s: None)
+
+        class FakeS3:
+            def download_file(self, bucket, key, path):
+                pathlib.Path(path).write_bytes(b"demo")
+
+        monkeypatch.setattr(cluster_run, "s3", lambda: FakeS3())
+        monkeypatch.setattr(cluster_run.analyze, "analyze", lambda dem: {
+            "demo": dem.name, "map": "de_nuke", "rounds": 24, "stack": [], "players": {},
+            "tradeable": {"a": {"b": 1}}})
+
+        assert cluster_run.main() == 0
+        saved = written[cluster_run.RESULTS_KEY]
+        assert len(saved) == 1
+        assert "tradeable" in saved[0]      # the fresh parse won, not the stored one
+
+    def test_entries_without_a_source_key_still_have_an_identity(self):
+        assert cluster_run.match_key({"demo": "a.dem"}) == "a.dem"
+        assert cluster_run.match_key({"demo": "a.dem", "source_key": "demos/a"}) == "demos/a"
 
 
 class TestConfig:

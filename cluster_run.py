@@ -113,6 +113,12 @@ def list_keys(prefix):
         token = page.get("NextContinuationToken")
 
 
+def match_key(match):
+    """What identifies a parsed match: the object it came from, falling back to the
+    demo filename for entries written before source_key existed."""
+    return match.get("source_key") or match.get("demo") or ""
+
+
 def demo_keys():
     """Demos under the prefix, and nothing else.
 
@@ -259,6 +265,25 @@ def row_for(match, key):
     }
 
 
+def merge_trend(existing, rows):
+    """The trend CSV with `rows` merged in, one row per demo, oldest first.
+
+    Keyed rather than appended: re-parsing a demo after a metric fix should correct its
+    row, not add a second one claiming something different about the same match.
+    """
+    by_demo = {}
+    for row in csv.DictReader(io.StringIO(existing)) if existing.strip() else ():
+        by_demo[row.get("demo")] = {f: row.get(f, "") for f in TREND_FIELDS}
+    for row in rows:
+        by_demo[row.get("demo")] = row
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=TREND_FIELDS)
+    w.writeheader()
+    for row in by_demo.values():
+        w.writerow(row)
+    return buf.getvalue()
+
+
 def append_trend(rows):
     if not rows:
         return
@@ -266,15 +291,8 @@ def append_trend(rows):
         existing = s3().get_object(Bucket=BUCKET, Key=TREND_KEY)["Body"].read().decode()
     except Exception:
         existing = ""
-    buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=TREND_FIELDS)
-    if existing.strip():
-        buf.write(existing if existing.endswith("\n") else existing + "\n")
-    else:
-        w.writeheader()
-    for row in rows:
-        w.writerow(row)
-    s3().put_object(Bucket=BUCKET, Key=TREND_KEY, Body=buf.getvalue().encode(), ContentType="text/csv")
+    s3().put_object(Bucket=BUCKET, Key=TREND_KEY,
+                    Body=merge_trend(existing, rows).encode(), ContentType="text/csv")
 
 
 def sync_stats(state):
@@ -402,7 +420,10 @@ def main():
     SCRATCH.mkdir(parents=True, exist_ok=True)
     state = get_json(STATE_KEY, {})
     seen = set(state.get("demos", []))
-    results = get_json(RESULTS_KEY, [])
+    # Keyed by object, not appended: re-parsing a demo should replace its entry, so a
+    # metric added to the parser can be backfilled by clearing `seen` and letting the
+    # runs catch up. Appending made results.json a mix of schema generations instead.
+    results = {match_key(m): m for m in get_json(RESULTS_KEY, [])}
 
     fetch_faceit(state)
     put_json(STATE_KEY, state)   # persist match ids even if parsing later fails
@@ -421,7 +442,7 @@ def main():
             log("parsing %s (%.0f MB unpacked)" % (key, dem.stat().st_size / 1e6))
             match = analyze.analyze(dem)
             match["source_key"] = key
-            results.append(match)
+            results[match_key(match)] = match
             write_artifacts(match, key, stats)
             row = row_for(match, key)
             if row:
@@ -445,10 +466,11 @@ def main():
                 if f is not None:
                     pathlib.Path(f).unlink(missing_ok=True)
 
-    put_json(RESULTS_KEY, results)
+    parsed = list(results.values())
+    put_json(RESULTS_KEY, parsed)
     append_trend(rows)
-    write_rollup(results, stats)
-    publish_report(results, stats)
+    write_rollup(parsed, stats)
+    publish_report(parsed, stats)
     state["demos"] = sorted(seen)
     put_json(STATE_KEY, state)
     log("done: %d parsed this run, %d tracked overall" % (len(rows), len(seen)))
