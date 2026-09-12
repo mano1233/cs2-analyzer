@@ -29,6 +29,7 @@ import boto3
 import zstandard
 
 import analyze
+import faceit_stats
 import report
 
 FACEIT_API = "https://open.faceit.com/data/v4"
@@ -41,6 +42,10 @@ API_KEY = os.environ.get("FACEIT_API_KEY", "")
 # token (application form, ~30 day wait). Without it, demos can only arrive by being
 # uploaded to the bucket - which this job parses just the same.
 DOWNLOADS_TOKEN = os.environ.get("FACEIT_DOWNLOADS_TOKEN", "")
+# Demo pulling is off by default: it cannot work without Downloads API access, and
+# demos arrive by upload instead. Stats need no such permission, so they stay on.
+FETCH_DEMOS = os.environ.get("FACEIT_FETCH_DEMOS", "0").lower() in ("1", "true", "yes")
+FETCH_STATS = os.environ.get("FACEIT_FETCH_STATS", "1").lower() in ("1", "true", "yes")
 DOWNLOADS_API = "https://open.faceit.com/download/v2/demos/download"
 SCRATCH = pathlib.Path(os.environ.get("SCRATCH", "/scratch"))
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "5"))
@@ -52,6 +57,7 @@ REPORT_CONFIGMAP = os.environ.get("REPORT_CONFIGMAP", "")
 SA = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount")
 
 STATE_KEY = "state/processed.json"
+STATS_KEY = "results/faceit_stats.json"
 RESULTS_KEY = "results/results.json"
 TREND_KEY = "results/trend.csv"
 DEMO_PREFIX = "demos/"
@@ -140,6 +146,9 @@ def signed_url(resource_url):
 
 def fetch_faceit(state):
     """Download demos for matches not yet seen. Returns list of new R2 demo keys."""
+    if not FETCH_DEMOS:
+        log("demo fetching disabled (FACEIT_FETCH_DEMOS); demos come from uploads")
+        return []
     if not API_KEY:
         log("FACEIT_API_KEY empty - skipping FACEIT fetch")
         return []
@@ -248,14 +257,32 @@ def append_trend(rows):
     s3().put_object(Bucket=BUCKET, Key=TREND_KEY, Body=buf.getvalue().encode(), ContentType="text/csv")
 
 
-def publish_report(results):
+def sync_stats():
+    """Per-match stats from the API. Independent of demos: this is what keeps the trend
+    current when no demo has been uploaded."""
+    if not (FETCH_STATS and API_KEY):
+        return []
+    known = get_json(STATS_KEY, [])
+    seen = {r.get("match_id") for r in known}
+    try:
+        fresh = faceit_stats.collect(NICKNAME, API_KEY, WINDOW_DAYS, log=log, seen=seen)
+    except Exception as e:
+        log("FACEIT stats sync failed: %r" % (e,))
+        return known
+    if fresh:
+        known = known + fresh
+        put_json(STATS_KEY, known)
+    return known
+
+
+def publish_report(results, stats=()):
     """Render the pages and push them into the ConfigMap the web pod mounts.
 
     Kubelet re-syncs mounted ConfigMaps on its own, so the served pages update without
     restarting anything. Raw HTTP against the API server rather than the kubernetes
     client library: it is one PATCH, and the in-cluster token and CA are right there.
     """
-    files = report.render(results, REPORT_DIR)
+    files = report.render(results, REPORT_DIR, stats=list(stats))
     log("rendered %s" % ", ".join(f.name for f in files))
     if not REPORT_CONFIGMAP:
         return
@@ -298,6 +325,7 @@ def main():
 
     fetch_faceit(state)
     put_json(STATE_KEY, state)   # persist match ids even if parsing later fails
+    stats = sync_stats()
 
     pending = [k for k in list_keys(DEMO_PREFIX) if k not in seen][:MAX_PER_RUN]
     log("%d demo(s) to parse" % len(pending))
@@ -331,7 +359,7 @@ def main():
 
     put_json(RESULTS_KEY, results)
     append_trend(rows)
-    publish_report(results)
+    publish_report(results, stats)
     state["demos"] = sorted(seen)
     put_json(STATE_KEY, state)
     log("done: %d parsed this run, %d tracked overall" % (len(rows), len(seen)))

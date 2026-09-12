@@ -62,7 +62,7 @@ class TestPublishGuards:
         monkeypatch.setattr(cluster_run, "SA", pathlib.Path(tmp_path / "no-sa"))
 
         big = tmp_path / "index.html"
-        def fake_render(results, out_dir):
+        def fake_render(results, out_dir, stats=()):
             big.parent.mkdir(parents=True, exist_ok=True)
             big.write_text("x" * 1_000_000, encoding="utf-8")
             return [big]
@@ -93,10 +93,21 @@ class TestConfig:
         assert list(row) == cluster_run.TREND_FIELDS
 
 
+class TestDemoFetchGates:
+    def test_demo_fetching_is_off_by_default(self, monkeypatch):
+        """Off unless asked: without Downloads API access it cannot succeed."""
+        assert cluster_run.FETCH_DEMOS is False
+        logged = []
+        monkeypatch.setattr(cluster_run, "log", logged.append)
+        assert cluster_run.fetch_faceit({}) == []
+        assert any("disabled" in m for m in logged)
+
+
 class TestDownloadsGate:
     def test_no_downloads_token_skips_the_fetch_entirely(self, monkeypatch):
         """Data API demo URLs are private; without the Downloads token there is nothing
         to try, so the run must not walk the whole window failing per match."""
+        monkeypatch.setattr(cluster_run, "FETCH_DEMOS", True)
         monkeypatch.setattr(cluster_run, "API_KEY", "key")
         monkeypatch.setattr(cluster_run, "DOWNLOADS_TOKEN", "")
         called = []

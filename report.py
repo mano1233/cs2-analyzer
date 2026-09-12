@@ -12,6 +12,7 @@ import html
 import pathlib
 
 import analyze
+import faceit_stats
 from analyze import ME
 
 # What "good" looks like, from the lobby averages of the first sample. Kept here rather
@@ -181,7 +182,8 @@ def build_index(matches, generated):
 <h2>Match by match</h2>
 {table(["Map", "Result", "Source", "Moving 1st %", "Acc %", "ADR", "Util/r", "Flash hit %"], rows)}
 </section>"""
-    return page("Where the rounds go", body, generated, nav='<a href="team.html">Team report &rarr;</a>')
+    return page("Where the rounds go", body, generated,
+                nav='<a href="team.html">Team report</a> &middot; <a href="faceit.html">Recent form (FACEIT)</a>')
 
 
 def build_team(matches, generated):
@@ -320,23 +322,88 @@ def build_player(matches, name, names, roles, generated):
                 nav='<a href="team.html">&larr; Team report</a> &middot; <a href="index.html">Personal report</a>')
 
 
-def render(matches, out_dir):
+def curated_averages(avg):
+    """[(label, value)] for recognised stats, tolerating the API's shifting key names."""
+    lower = {k.lower(): v for k, v in avg.items()}
+    out = []
+    for label, candidates in faceit_stats.CURATED:
+        for key in candidates:
+            if key.lower() in lower:
+                out.append((label, lower[key.lower()]))
+                break
+    return out
+
+
+def build_faceit(stats, generated, has_demos):
+    avg = faceit_stats.averages(stats)
+    pairs = curated_averages(avg)
+    cards = "".join(
+        f'<div class="card"><span class="label">{esc(label)}</span>'
+        f'<span class="value">{num(value, 1)}</span></div>'
+        for label, value in pairs)
+    win = avg.get("_win_rate")
+    head_cards = (f'<div class="card"><span class="label">maps</span>'
+                  f'<span class="value">{int(avg.get("_maps", 0))}</span></div>'
+                  + (f'<div class="card"><span class="label">win rate</span>'
+                     f'<span class="value">{num(win, 0)}%</span></div>' if win is not None else ""))
+
+    labels = [label for label, _ in faceit_stats.CURATED][:8]
+    rows = []
+    for row in sorted(stats, key=lambda r: r.get("finished_at") or 0, reverse=True):
+        got = dict(faceit_stats.curated(row.get("stats", {})))
+        when = row.get("finished_at")
+        date = (dt.datetime.fromtimestamp(when, dt.timezone.utc).strftime("%Y-%m-%d")
+                if isinstance(when, (int, float)) else "-")
+        rows.append([date, (row.get("map") or "-").replace("de_", ""),
+                     row.get("score") or "-", "W" if row.get("won") else "L"]
+                    + [num(faceit_stats.as_number(got.get(l)), 1) if got.get(l) is not None else "-"
+                       for l in labels])
+
+    nav = '<a href="team.html">Team report</a>' if has_demos else ""
+    body = f"""<header class="masthead">
+<p class="eyebrow">from the FACEIT API &middot; no demo needed</p>
+<h1>Recent form</h1>
+<p class="note">Straight from FACEIT for every match in the window, refreshed on every run. These are the scoreboard and FACEIT's own advanced stats - the demo-only findings (whether you were moving when you fired, who trades for whom, how the halves differ) live in the team report.</p>
+</header>
+<section>
+<h2>Averages across the window</h2>
+<div class="cards">{head_cards}{cards}</div>
+</section>
+<section>
+<h2>Match by match</h2>
+{table(["Date", "Map", "Score", "W/L"] + labels, rows)}
+<p class="note">Blank cells are stats FACEIT did not return for that match. The key names are undocumented and have changed before, so anything unrecognised is kept in the stored data even when it is not shown here.</p>
+</section>"""
+    return page("Recent form", body, generated, nav=nav)
+
+
+def render(matches, out_dir, stats=()):
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     generated = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     playable = [m for m in matches if ME in m.get("players", {})]
+    stats = list(stats)
+
     if not playable:
-        (out / "index.html").write_text(
-            page("Where the rounds go", '<header class="masthead"><h1>No matches yet</h1>'
-                 '<p class="note">The analyzer has not parsed a demo with this player in it.</p></header>',
-                 generated), encoding="utf-8")
+        # No demo parsed yet: the API stats still make a useful front page.
+        if stats:
+            (out / "index.html").write_text(build_faceit(stats, generated, has_demos=False),
+                                            encoding="utf-8")
+        else:
+            (out / "index.html").write_text(
+                page("Where the rounds go", '<header class="masthead"><h1>No matches yet</h1>'
+                     '<p class="note">No demo has been parsed and the FACEIT stats sync has '
+                     'returned nothing yet.</p></header>', generated), encoding="utf-8")
         return [out / "index.html"]
+
     names = analyze.roster(playable)
     pooled = analyze.pooled_players(playable, names)
     roles = analyze.assign_roles({n: analyze.role_signals(pooled[n]) for n in names})
 
     pages = {"index.html": build_index(playable, generated),
              "team.html": build_team(playable, generated)}
+    if stats:
+        pages["faceit.html"] = build_faceit(stats, generated, has_demos=True)
     for n in names:
         pages[slug(n)] = build_player(playable, n, names, roles, generated)
 

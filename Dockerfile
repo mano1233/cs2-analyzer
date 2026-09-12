@@ -7,12 +7,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY analyze.py team.py report.py cluster_run.py ./
+COPY analyze.py team.py report.py faceit_stats.py cluster_run.py ./
 
 # Import everything at build time: a file missing from the COPY above used to fail
 # only at 04:00, inside the CronJob, as a ModuleNotFoundError. No env needed - the
 # modules read their config lazily, which tests/test_image.py enforces.
-RUN python -c "import analyze, report, team, cluster_run"
+RUN python -c "import analyze, report, team, faceit_stats, cluster_run"
 
 RUN groupadd -r cs2 && useradd -r -g cs2 cs2 \
     && mkdir -p /scratch && chown cs2:cs2 /scratch

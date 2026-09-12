@@ -30,6 +30,8 @@ Beyond kills and damage, the things that actually explain lost rounds:
 | `analyze.py` | The parser and all metrics. `analyze(dem)` returns one match; run directly for a per-match and pooled table. |
 | `team.py` | Team report: individual performance, role signals, per-half tables, trade/flash/proximity matrices. |
 | `cluster_run.py` | The CronJob entrypoint. Fetches new FACEIT demos, parses one at a time in scratch, writes results back to R2, publishes the report. |
+| `faceit_stats.py` | Per-match stats from the API - no demo needed. Schema-agnostic: undocumented keys are kept as returned. |
+| `upload_demos.py` | Uploads demos from this machine into the bucket. Runs on your PC, not in the image. |
 | `report.py` | Renders `index.html` (headline metrics + per-match rows) and `team.html` (roles, per-half, trade/flash/distance matrices) from parsed results. |
 | `Dockerfile` | Multi-arch image (`linux/amd64`, `linux/arm64`). |
 
@@ -68,6 +70,8 @@ CI runs them on every push and pull request, and the image build depends on them
 | `R2_BUCKET`, `R2_ENDPOINT` | S3-compatible target holding `demos/`, `results/`, `state/` |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | R2 credentials (Terraform mints these) |
 | `FACEIT_API_KEY` | Server-side FACEIT Data API key. Empty is valid: it then only parses demos already in the bucket |
+| `FACEIT_FETCH_DEMOS` | Off by default. Demo fetching needs Downloads API access, which is not available, so demos arrive by upload |
+| `FACEIT_FETCH_STATS` | On by default. Per-match stats from the API need no special permission |
 | `FACEIT_DOWNLOADS_TOKEN` | Token with Downloads API scope. Without it no demo can be fetched: the Data API's `demo_url` is a private resource URL whose host does not resolve, and it must be exchanged for a signed URL via `POST /download/v2/demos/download`. Access is by application (fce.gg/downloads-api-application, ~30 days) |
 | `FACEIT_NICKNAME` | Whose matches to fetch and whose stats to track |
 | `MAX_PER_RUN` | Cap on demos downloaded and parsed per run |
@@ -76,8 +80,13 @@ CI runs them on every push and pull request, and the image build depends on them
 | `REPORT_CONFIGMAP` | ConfigMap to patch with the rendered pages; the web pod mounts it and kubelet re-syncs it, so nothing restarts |
 | `SCRATCH` | Scratch dir for one demo at a time (an `emptyDir` in the CronJob) |
 
-Output: `results/results.json` (full per-match, per-player counters) and
-`results/trend.csv` (one row per match with the headline metrics).
+Output: `results/results.json` (full per-match, per-player counters),
+`results/trend.csv` (one row per match with the headline metrics) and
+`results/faceit_stats.json` (raw per-match API stats).
+
+Pages: `index.html`, `team.html`, a page per player, and `faceit.html` for the API
+stats. With no demo parsed yet, the API stats become `index.html` - so the site is
+useful from the first run, before any demo is uploaded.
 
 ## Getting demos in
 

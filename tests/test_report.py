@@ -90,3 +90,35 @@ class TestFormatting:
             p.update(flashes=0, flashes_hit=0)
         report.render([m, make_match([analyze.ME, "Other"])], tmp_path)
         assert "nan" not in (tmp_path / "index.html").read_text(encoding="utf-8").lower()
+
+
+class TestFaceitStatsPage:
+    def stats_rows(self):
+        return [{"match_id": "m1", "map": "de_anubis", "score": "13 / 9", "won": True,
+                 "finished_at": 1757000000, "nickname": analyze.ME,
+                 "stats": {"Kills": "20", "Deaths": "15", "ADR": "78.5",
+                           "Headshots %": "45", "Utility Damage": "120"}},
+                {"match_id": "m2", "map": "de_nuke", "score": "10 / 13", "won": False,
+                 "finished_at": 1757100000, "nickname": analyze.ME,
+                 "stats": {"Kills": "12", "Deaths": "18", "ADR": "55.0"}}]
+
+    def test_stats_page_is_written_alongside_the_demo_pages(self, matches, tmp_path):
+        written = report.render(matches, tmp_path, stats=self.stats_rows())
+        assert "faceit.html" in {f.name for f in written}
+
+    def test_without_demos_the_stats_become_the_front_page(self, tmp_path):
+        """The whole point: a nightly trend with no demo uploaded at all."""
+        written = report.render([], tmp_path, stats=self.stats_rows())
+        page = (tmp_path / "index.html").read_text(encoding="utf-8")
+        assert [f.name for f in written] == ["index.html"]
+        assert "Recent form" in page
+        assert "anubis" in page
+
+    def test_no_demos_and_no_stats_still_renders(self, tmp_path):
+        report.render([], tmp_path, stats=[])
+        assert "No matches yet" in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+    def test_missing_stat_in_one_match_renders_a_dash_not_nan(self, tmp_path):
+        report.render([], tmp_path, stats=self.stats_rows())
+        page = (tmp_path / "index.html").read_text(encoding="utf-8")
+        assert "nan" not in page.lower()
