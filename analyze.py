@@ -480,7 +480,9 @@ def scope_rates(s, prefix=""):
         "accuracy%": 100 * div(s[prefix + "hits"], s[prefix + "shots"]),
         "moving 1st shot%": 100 * div(s[prefix + "first_shots_moving"], s[prefix + "first_shots"]),
         "util thrown/r": s[prefix + "util_thrown"] / r,
-        "flash hit%": 100 * div(s[prefix + "flashes_hit"], s[prefix + "flashes"]),
+        # Same label as rates() for the same computation, so the two can be merged
+        # without publishing one number under two names.
+        "flash hit% (>=1 enemy)": 100 * div(s[prefix + "flashes_hit"], s[prefix + "flashes"]),
         "traded death%": 100 * div(s[prefix + "deaths_traded"], s[prefix + "deaths"]),
         "traded death% (of available)": 100 * div(s[prefix + "deaths_traded"],
                                               s[prefix + "deaths_tradeable"]),

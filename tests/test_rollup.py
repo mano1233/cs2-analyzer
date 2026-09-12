@@ -91,6 +91,33 @@ class TestPlayerRows:
         assert "count_kills" in metrics      # how much
         assert "k_d" in metrics              # how good
 
+    def test_unscoped_metrics_are_queryable_too(self, match):
+        """scope_rates only carries what splits by side or half, so the utility family
+        reached the parquet as raw counters and nothing else. These are the numbers the
+        practice is aimed at - they have to be answerable in SQL, not just on a page."""
+        match["players"][analyze.ME].update(death_nearest_sum=24000.0, death_nearest_n=40)
+        metrics = {r["metric"] for r in rollup.player_rows(match, "1-abc", "2026-09-11")
+                   if r["scope"] == "all" and r["stat_source"] == "demo"}
+        for expected in ("nearest_mate_at_death_m", "flash_to_kill_flash", "util_dmg_per_round",
+                         "util_used_pct_of_owned", "died_holding_util_pct",
+                         "util_before_1st_kill_pct"):
+            assert expected in metrics, expected
+
+    def test_the_side_scopes_stay_side_shaped(self, match):
+        """rates() is unscoped, so merging it into t_/ct_ would silently attribute
+        whole-match numbers to one side."""
+        rows = rollup.player_rows(match, "1-abc", "2026-09-11")
+        t_metrics = {r["metric"] for r in rows if r["scope"] == "t" and r["stat_source"] == "demo"}
+        assert "nearest_mate_at_death_m" not in t_metrics
+
+    def test_one_number_is_not_published_under_two_names(self, match):
+        """rates() and scope_rates() both compute flash hit rate; they must agree on
+        the label, or a query gets two metrics that are the same measurement."""
+        rows = [r for r in rollup.player_rows(match, "1-abc", "2026-09-11")
+                if r["scope"] == "all" and r["player"] == analyze.ME
+                and r["metric"].startswith("flash_hit_pct")]
+        assert len({r["metric"] for r in rows}) == 1
+
 
 class TestMatchRows:
     def test_team_metrics_are_present(self, match):
