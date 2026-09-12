@@ -75,6 +75,9 @@ CI runs them on every push and pull request, and the image build depends on them
 | `FACEIT_FETCH_STATS` | On by default. Per-match stats from the API need no special permission |
 | `FACEIT_DOWNLOADS_TOKEN` | Token with Downloads API scope. Without it no demo can be fetched: the Data API's `demo_url` is a private resource URL whose host does not resolve, and it must be exchanged for a signed URL via `POST /download/v2/demos/download`. Access is by application (fce.gg/downloads-api-application, ~30 days) |
 | `FACEIT_NICKNAME` | Whose matches to fetch and whose stats to track |
+| `TRACKED_STEAMIDS` | Comma-separated steamid64s to report on. Preferred over names: nicknames change, ids do not |
+| `TRACKED_PLAYERS` | Comma-separated nicknames, case-insensitive. Fallback when steamids are not to hand |
+| `TRACKED_OWNER` | The "me" the personal pages centre on (default `mirithefish`) |
 | `MAX_PER_RUN` | Cap on demos downloaded and parsed per run |
 | `FACEIT_WINDOW_DAYS` | How far back to look for matches (default 21 - "the last three weeks", not a fixed match count) |
 | `REPORT_DIR` | Where the HTML is rendered before publishing |

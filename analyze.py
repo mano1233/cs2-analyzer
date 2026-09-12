@@ -7,6 +7,7 @@ individual / role / pairing report from the same results.json.
 Players are keyed by name: steamid columns go float64 when NaN-padded and lose precision.
 """
 import json
+import os
 import pathlib
 from collections import defaultdict
 
@@ -15,7 +16,13 @@ import pandas as pd
 from demoparser2 import DemoParser
 
 ROOT = pathlib.Path(__file__).parent
-ME = "mirithefish"
+ME = os.environ.get("TRACKED_OWNER", "mirithefish")
+
+# The roster to report on. Explicit beats inferred: a stand-in match or a Premier game
+# without the stack defeats "whoever shared my team most rounds". SteamIDs are preferred
+# because nicknames change; names are the fallback for readability.
+TRACKED_IDS = [s.strip() for s in os.environ.get("TRACKED_STEAMIDS", "").split(",") if s.strip()]
+TRACKED_NAMES = [n.strip() for n in os.environ.get("TRACKED_PLAYERS", "").split(",") if n.strip()]
 TR = 64                       # ticks per second
 TRADE_WINDOW = 5 * TR
 EFFECTIVE_BLIND = 1.0         # seconds; shorter blinds rarely decide a duel
@@ -418,8 +425,40 @@ def pool(dicts):
 
 # ---- shared team helpers (used by team.py and report.py) --------------------
 
+def tracked_in(match):
+    """Players from the configured roster who appear in this match.
+
+    Falls back to the inferred stack when no roster is configured, so nothing breaks
+    without the env vars.
+    """
+    players = match.get("players", {})
+    steamids = match.get("steamids", {})
+    if TRACKED_IDS:
+        wanted = set(TRACKED_IDS)
+        found = [n for n in players if str(steamids.get(n, "")) in wanted]
+        if found:
+            return sorted(found)
+    if TRACKED_NAMES:
+        lower = {n.lower(): n for n in players}
+        found = [lower[w.lower()] for w in TRACKED_NAMES if w.lower() in lower]
+        if found:
+            return sorted(found)
+    return sorted(match.get("stack", []))
+
+
 def roster(matches, me=ME, min_share=0.5):
-    """Stack-mates present in at least half the matches, me first. Stand-ins drop out."""
+    """Who to report on, me first.
+
+    A configured roster (TRACKED_STEAMIDS / TRACKED_PLAYERS) wins. Otherwise: stack-mates
+    present in at least half the matches, which drops stand-ins.
+    """
+    if TRACKED_IDS or TRACKED_NAMES:
+        seen = defaultdict(int)
+        for m in matches:
+            for n in tracked_in(m):
+                seen[n] += 1
+        names = sorted(seen, key=lambda n: (-seen[n], n))
+        return ([me] + [n for n in names if n != me]) if me in seen else names
     seen = defaultdict(int)
     for m in matches:
         for n in m.get("stack", []):

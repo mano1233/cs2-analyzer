@@ -35,15 +35,20 @@ def match():
 
 
 class TestLayout:
-    def test_writes_metadata_teams_and_one_file_per_player(self, match):
+    def test_writes_metadata_teams_and_a_file_per_tracked_player(self, match):
+        """Default is the tracked roster, not the whole lobby: opponents contribute to
+        the baseline but do not each get a file."""
         files = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")
         assert "metadata.json" in files and "teams.json" in files
-        assert sum(1 for k in files if k.startswith("players/")) == 3
+        assert sum(1 for k in files if k.startswith("players/")) == 2
 
     def test_player_paths_are_confined_to_the_match_prefix(self, match):
-        match["players"]["../../etc/passwd"] = dict(counters())
-        match["steamids"]["../../etc/passwd"] = "1"
+        hostile = "../../etc/passwd"
+        match["players"][hostile] = dict(counters())
+        match["steamids"][hostile] = "1"
+        match["stack"].append(hostile)          # tracked, so it actually gets a file
         files = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")
+        assert any(k.startswith("players/") and "passwd" in k for k in files)
         for key in files:
             assert ".." not in key
             assert key.count("/") <= 1
@@ -158,3 +163,31 @@ def test_everything_is_json_serialisable(match):
     files = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst")
     for name, obj in files.items():
         json.loads(json.dumps(obj, default=float))
+
+
+class TestTrackedRoster:
+    def test_only_tracked_players_get_files(self, match):
+        files = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst",
+                                tracked=[analyze.ME, "LipT0N"])
+        assert set(k for k in files if k.startswith("players/")) == {
+            "players/mirithefish.json", "players/lipt0n.json"}
+
+    def test_opponents_still_feed_the_lobby_baseline(self, match):
+        teams = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst",
+                                tracked=[analyze.ME, "LipT0N"])["teams.json"]
+        assert teams["lobby_baseline"] is not None
+        assert teams["tracked"] == ["LipT0N", analyze.ME]
+
+    def test_baseline_is_none_when_everyone_is_tracked(self, match):
+        teams = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst",
+                                tracked=list(match["players"]))["teams.json"]
+        assert teams["lobby_baseline"] is None
+
+    def test_both_teams_still_appear_in_metadata(self, match):
+        """Opponents lose their per-player file, not their existence: the scoreline and
+        who we played still matter."""
+        meta = artifacts.build(match, "1-abc", "demos/1-abc.dem.zst",
+                               tracked=[analyze.ME])["metadata.json"]
+        assert len(meta["teams"]) == 2
+        names = [p["nickname"] for t in meta["teams"] for p in t["players"]]
+        assert "enemy1" in names

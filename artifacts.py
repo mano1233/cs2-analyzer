@@ -54,8 +54,12 @@ def source_of(key_or_name):
 
 
 def build(match, match_id, source_key, stats_rows=(), finished_at=None, mtime=None,
-          image=None, demo_available=None):
-    """Return {relative path: json-able object} for one match."""
+          image=None, demo_available=None, tracked=None):
+    """Return {relative path: json-able object} for one match.
+
+    `tracked` limits the per-player files to our own roster; the opponents still
+    contribute to the lobby baseline in teams.json, they just do not get a file each.
+    """
     source = source_of(source_key)
     date = match_date(match, finished_at, mtime)
     steamids = match.get("steamids", {})
@@ -73,7 +77,7 @@ def build(match, match_id, source_key, stats_rows=(), finished_at=None, mtime=No
             side = analyze.T_SIDE if c.get("t_rounds", 0) >= c.get("ct_rounds", 0) else analyze.CT_SIDE
         by_team.setdefault(int(side), []).append(name)
 
-    stack = set(match.get("stack", []))
+    stack = set(tracked if tracked is not None else analyze.tracked_in(match))
     faceit_by_player = {row.get("nickname"): row for row in stats_rows or ()}
 
     metadata = {
@@ -121,10 +125,17 @@ def build(match, match_id, source_key, stats_rows=(), finished_at=None, mtime=No
             "prox_n": match.get("prox_n", {}),
         },
         "economy_thresholds": {"eco_below": analyze.ECO_MAX, "full_above": analyze.FORCE_MAX},
+        # Everyone else, pooled: keeps the comparison baseline without writing a file
+        # per opponent we will never look at individually.
+        "lobby_baseline": analyze.rates(analyze.pool(
+            c for n, c in players.items() if n not in stack)) if len(players) > len(stack) else None,
+        "tracked": sorted(stack),
     }
 
     out = {"metadata.json": metadata, "teams.json": teams}
     for name, counters in players.items():
+        if name not in stack:
+            continue
         api_row = faceit_by_player.get(name)
         out["players/%s.json" % slug(name)] = {
             "match_id": match_id,

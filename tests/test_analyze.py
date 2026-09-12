@@ -190,3 +190,32 @@ class TestPairMatrix:
     def test_pair_never_sampled_is_none(self):
         m = analyze.pair_matrix([match(["a", "b"], {})], "prox_sum", ["a", "b"], mean=True)
         assert m["a"]["b"] is None
+
+
+class TestTrackedConfig:
+    def make(self):
+        return {"players": {"mirithefish": {}, "LipT0N": {}, "enemy": {}},
+                "steamids": {"mirithefish": "76561198059143085",
+                             "LipT0N": "76561198830705343", "enemy": "76561190000000000"},
+                "stack": ["mirithefish", "LipT0N"]}
+
+    def test_steamids_win_over_names(self, monkeypatch):
+        monkeypatch.setattr(analyze, "TRACKED_IDS", ["76561198059143085"])
+        monkeypatch.setattr(analyze, "TRACKED_NAMES", ["enemy"])
+        assert analyze.tracked_in(self.make()) == ["mirithefish"]
+
+    def test_names_are_matched_case_insensitively(self, monkeypatch):
+        monkeypatch.setattr(analyze, "TRACKED_IDS", [])
+        monkeypatch.setattr(analyze, "TRACKED_NAMES", ["lipt0n", "MIRITHEFISH"])
+        assert analyze.tracked_in(self.make()) == ["LipT0N", "mirithefish"]
+
+    def test_falls_back_to_the_inferred_stack(self, monkeypatch):
+        monkeypatch.setattr(analyze, "TRACKED_IDS", [])
+        monkeypatch.setattr(analyze, "TRACKED_NAMES", [])
+        assert analyze.tracked_in(self.make()) == ["LipT0N", "mirithefish"]
+
+    def test_a_roster_that_matches_nobody_falls_back(self, monkeypatch):
+        """A renamed player must not silently produce an empty report."""
+        monkeypatch.setattr(analyze, "TRACKED_IDS", ["76561190000000999"])
+        monkeypatch.setattr(analyze, "TRACKED_NAMES", [])
+        assert analyze.tracked_in(self.make()) == ["LipT0N", "mirithefish"]
