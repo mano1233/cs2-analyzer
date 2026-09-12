@@ -83,6 +83,12 @@ def player_rows(match, match_id, date, stats_rows=(), tracked=None):
             rates = analyze.scope_rates(counters, prefix)
             if not rates["rounds"]:
                 continue
+            if prefix == "":
+                # scope_rates only carries what splits by side or half. The rest -
+                # the whole utility family, flash conversion, distance at death -
+                # lives in rates(), and without this the parquet could not answer
+                # questions the player pages already answer.
+                rates = dict(rates, **analyze.rates(counters))
             for label, value in rates.items():
                 number = _numeric(value)
                 if number is None:
