@@ -1,0 +1,5 @@
+# demoparser2 is the CS2 demo parser (Rust core, prebuilt aarch64 wheels).
+demoparser2==0.42.0
+zstandard>=0.22,<1.0
+pandas>=2.2,<4.0
+boto3>=1.34,<2.0

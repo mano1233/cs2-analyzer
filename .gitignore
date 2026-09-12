@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.dem
+*.dem.zst
+*.dem.bz2
+results.json
+trend.csv
+processed.json
+watch.log
+.venv/
