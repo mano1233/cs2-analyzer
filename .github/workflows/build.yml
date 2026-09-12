@@ -3,6 +3,7 @@ name: Build image
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -10,7 +11,25 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - run: pytest
+
   build:
+    # Never publish an image the suite has not passed: a broken image only shows up
+    # at 04:00 in the CronJob, after a full ARM build under emulation.
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

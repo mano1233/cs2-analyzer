@@ -45,6 +45,20 @@ python -m venv .venv && .venv/Scripts/python -m pip install -r requirements.txt
 Demos are read from the working directory. FACEIT hands out `.dem.zst`; the parser needs
 an unpacked `.dem`, so decompress first (`cluster_run.py` does this automatically).
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+They cover the metric maths, roster and role assignment, the renderer's awkward cases
+(no matches, a player missing, NaN, hostile names), the trend row, the publish guards,
+and the image itself - that every module in the repo is actually COPYed in, which is
+how a missing file used to reach the CronJob before anyone noticed.
+
+CI runs them on every push and pull request, and the image build depends on them.
+
 ## Running in the cluster
 
 `cluster_run.py` expects:
