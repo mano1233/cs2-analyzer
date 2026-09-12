@@ -9,6 +9,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY analyze.py team.py report.py cluster_run.py ./
 
+# Import everything at build time: a file missing from the COPY above used to fail
+# only at 04:00, inside the CronJob, as a ModuleNotFoundError. Dummy values because
+# the entrypoint reads its config at import.
+RUN R2_BUCKET=build-check R2_ENDPOINT=http://build-check     python -c "import analyze, report, team, cluster_run"
+
 RUN groupadd -r cs2 && useradd -r -g cs2 cs2 \
     && mkdir -p /scratch && chown cs2:cs2 /scratch
 USER cs2
