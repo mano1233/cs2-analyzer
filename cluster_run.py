@@ -336,7 +336,7 @@ def sync_stats(state):
 def write_artifacts(match, key, stats):
     """Canonical per-match files. Written before anything derived, so a later rollup or
     render can be rebuilt from them without the demo - which is deleted after parsing."""
-    match_id = pathlib.Path(key).name.split(".dem")[0]
+    match_id = artifacts.match_id_from(key)
     rows = [r for r in (stats or []) if r.get("match_id") == match_id]
     finished = rows[0].get("finished_at") if rows else None
     mtime = None

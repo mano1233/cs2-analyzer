@@ -55,6 +55,21 @@ def source_of(key_or_name):
     return "premier" if "match730" in str(key_or_name) else "faceit"
 
 
+def match_id_from(key_or_name):
+    """The match id an object key belongs to.
+
+    FACEIT names a demo <match_id>-<map>-<part>.dem, so the filename carries a "-1-1"
+    the API's match_id does not. Derived ids kept that suffix, so every join against the
+    stats returned nothing: no faceit block in any player file, no faceit rows in the
+    rollup, and finished_at always null. Premier names have no such suffix and are left
+    alone.
+    """
+    stem = str(key_or_name).split("/")[-1].split(".dem")[0]
+    if source_of(stem) == "premier":
+        return stem
+    return re.sub(r"-\d+-\d+$", "", stem)
+
+
 def build(match, match_id, source_key, stats_rows=(), finished_at=None, mtime=None,
           image=None, demo_available=None, tracked=None):
     """Return {relative path: json-able object} for one match.
