@@ -161,6 +161,50 @@ class TestOneBadDemo:
             self.run_with(monkeypatch, tmp_path, KeyboardInterrupt())
 
 
+class TestDemoDeletion:
+    """The only thing that removes data from the bucket. Off unless asked for, and
+    never on a demo whose canonical artifacts did not land."""
+
+    def run_with(self, monkeypatch, tmp_path, *, enabled, archived=True):
+        deleted, written = [], {}
+        monkeypatch.setattr(cluster_run, "SCRATCH", tmp_path)
+        monkeypatch.setattr(cluster_run, "DELETE_PARSED_DEMOS", enabled)
+        monkeypatch.setattr(cluster_run, "get_json", lambda key, default: default)
+        monkeypatch.setattr(cluster_run, "put_json", lambda key, obj: written.__setitem__(key, obj))
+        monkeypatch.setattr(cluster_run, "fetch_faceit", lambda state: None)
+        monkeypatch.setattr(cluster_run, "sync_stats", lambda state: [])
+        monkeypatch.setattr(cluster_run, "demo_keys", lambda: ["demos/a.dem"])
+        monkeypatch.setattr(cluster_run, "append_trend", lambda rows: None)
+        monkeypatch.setattr(cluster_run, "write_rollup", lambda r, s: None)
+        monkeypatch.setattr(cluster_run, "publish_report", lambda r, s: None)
+        monkeypatch.setattr(cluster_run, "write_artifacts", lambda m, k, s: archived)
+
+        class FakeS3:
+            def download_file(self, bucket, key, path):
+                pathlib.Path(path).write_bytes(b"demo")
+
+            def delete_object(self, Bucket, Key):
+                deleted.append(Key)
+
+        monkeypatch.setattr(cluster_run, "s3", lambda: FakeS3())
+        monkeypatch.setattr(cluster_run.analyze, "analyze", lambda dem: {
+            "demo": dem.name, "map": "de_nuke", "rounds": 24, "stack": [], "players": {}})
+        assert cluster_run.main() == 0
+        return deleted
+
+    def test_demos_are_kept_by_default(self, monkeypatch, tmp_path):
+        """A demo that is gone can never be re-parsed, so every future metric would
+        start from the day it shipped instead of applying to history."""
+        assert self.run_with(monkeypatch, tmp_path, enabled=False) == []
+
+    def test_the_toggle_deletes_the_parsed_demo(self, monkeypatch, tmp_path):
+        assert self.run_with(monkeypatch, tmp_path, enabled=True) == ["demos/a.dem"]
+
+    def test_a_failed_artifact_write_keeps_the_demo(self, monkeypatch, tmp_path):
+        """Otherwise the only copy of the match is deleted along with the demo."""
+        assert self.run_with(monkeypatch, tmp_path, enabled=True, archived=False) == []
+
+
 class TestTrendIsKeyed:
     def row(self, demo, **over):
         return dict({f: "" for f in cluster_run.TREND_FIELDS}, demo=demo, **over)
