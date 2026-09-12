@@ -16,24 +16,54 @@ import urllib.request
 
 API = "https://open.faceit.com/data/v4"
 
-# Curated view: label -> candidate keys, tried in order, case-insensitively. FACEIT has
-# shipped both "Flash Successes" and "Flash Success Rate" style names.
+# Curated view: label -> candidate keys, tried in order, case-insensitively.
+# The real schema, confirmed from a live run on 2026-09-12 (47 keys). Ordered by what
+# the player is working on: aim, then support utility, then entry duels.
 CURATED = [
+    ("ADR", ["ADR"]),
+    ("K/D", ["K/D Ratio"]),
+    ("K/R", ["K/R Ratio"]),
+    ("HS %", ["Headshots %"]),
     ("Kills", ["Kills"]),
     ("Deaths", ["Deaths"]),
     ("Assists", ["Assists"]),
-    ("K/D", ["K/D Ratio", "K/D"]),
-    ("K/R", ["K/R Ratio", "K/R"]),
-    ("ADR", ["ADR", "Average Damage per Round", "Damage per Round"]),
-    ("HS %", ["Headshots %", "Headshot %", "Headshots percentage"]),
+    ("Utility thrown", ["Utility Count"]),
+    ("Utility / round", ["Utility Usage per Round"]),
+    ("Utility successes", ["Utility Successes"]),
+    ("Utility success %", ["Utility Success Rate per Match"]),
+    ("Utility damage", ["Utility Damage"]),
+    ("Utility dmg / round", ["Utility Damage per Round in a Match"]),
+    ("Enemies hit by utility", ["Utility Enemies"]),
+    ("Flashes thrown", ["Flash Count"]),
+    ("Flashes / round", ["Flashes per Round in a Match"]),
+    ("Flash successes", ["Flash Successes"]),
+    ("Flash success %", ["Flash Success Rate per Match"]),
+    ("Enemies flashed", ["Enemies Flashed"]),
+    ("Enemies flashed / round", ["Enemies Flashed per Round in a Match"]),
+    ("Entry attempts", ["Entry Count"]),
+    ("Entry wins", ["Entry Wins"]),
+    ("Entry success %", ["Match Entry Success Rate"]),
+    ("Entries / round", ["Match Entry Rate"]),
+    ("First kills", ["First Kills"]),
+    ("Clutch kills", ["Clutch Kills"]),
+    ("1v1 won", ["1v1Wins"]),
+    ("1v1 faced", ["1v1Count"]),
+    ("Sniper kills", ["Sniper Kills"]),
     ("MVPs", ["MVPs"]),
-    ("Utility damage", ["Utility Damage", "Utility Damage per Round"]),
-    ("Enemies flashed", ["Enemies Flashed", "Enemies Flashed per Round"]),
-    ("Flash success", ["Flash Success Rate", "Flash Successes", "Flash Success Rate per Match"]),
-    ("Entries", ["Entry Count", "Entry Rate"]),
-    ("Entry wins", ["Entry Wins", "Entry Success Rate"]),
-    ("Clutches", ["Clutch Kills", "1v1Wins", "1v2Wins", "Match 1v1 Wins"]),
 ]
+
+# These arrive as 0-1 fractions (Entry Rate 0.17 alongside Entry Count 3 over 18
+# rounds), unlike "Headshots %" which is already 0-100. Scaled for display only.
+PERCENT_KEYS = {
+    "match entry success rate", "match entry rate", "flash success rate per match",
+    "utility success rate per match", "utility damage success rate per match",
+    "sniper kill rate per match", "sniper kill rate per round",
+    "match 1v1 win rate", "match 1v2 win rate",
+}
+
+# Shown on the summary cards: the metrics tied to the aim and support-utility goals.
+HEADLINE = ["ADR", "K/D", "HS %", "Utility / round", "Utility dmg / round",
+            "Flash success %", "Enemies flashed / round", "Entry success %", "First kills"]
 
 
 def _get(path, api_key):
@@ -122,14 +152,23 @@ def as_number(value):
         return None
 
 
+def scale(key, value):
+    """Fraction-style rates become percentages; everything else is untouched."""
+    n = as_number(value)
+    if n is not None and key.lower() in PERCENT_KEYS:
+        return n * 100.0
+    return n if n is not None else value
+
+
 def curated(stats):
-    """[(label, raw value)] for the keys we recognise, in a fixed order."""
-    lower = {k.lower(): v for k, v in stats.items()}
+    """[(label, value)] for the keys we recognise, in a fixed order."""
+    lower = {k.lower(): (k, v) for k, v in stats.items()}
     out = []
     for label, candidates in CURATED:
         for key in candidates:
             if key.lower() in lower:
-                out.append((label, lower[key.lower()]))
+                real_key, value = lower[key.lower()]
+                out.append((label, scale(real_key, value)))
                 break
     return out
 

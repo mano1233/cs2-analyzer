@@ -75,12 +75,12 @@ class TestNumbers:
 class TestCurated:
     def test_finds_keys_regardless_of_case(self):
         got = dict(faceit_stats.curated({"kills": "5", "adr": "70"}))
-        assert got["Kills"] == "5"
-        assert got["ADR"] == "70"
+        assert got["Kills"] == 5.0
+        assert got["ADR"] == 70.0
 
-    def test_accepts_either_alias(self):
-        assert dict(faceit_stats.curated({"K/D Ratio": "1.2"}))["K/D"] == "1.2"
-        assert dict(faceit_stats.curated({"K/D": "1.2"}))["K/D"] == "1.2"
+    def test_uses_the_key_faceit_actually_sends(self):
+        """Confirmed live: the key is "K/D Ratio", not "K/D"."""
+        assert dict(faceit_stats.curated({"K/D Ratio": "1.2"}))["K/D"] == 1.2
 
     def test_missing_stats_are_simply_absent(self):
         assert dict(faceit_stats.curated({})) == {}
@@ -105,3 +105,34 @@ class TestAverages:
 
     def test_empty_input(self):
         assert faceit_stats.averages([])["_maps"] == 0
+
+
+class TestRealSchema:
+    """Keys confirmed from a live run, so a rename shows up as a test failure."""
+
+    LIVE = {"ADR": "41.2", "K/D Ratio": "0.38", "Headshots %": "17", "Utility Count": "9",
+            "Utility Usage per Round": "0.5", "Utility Damage": "75", "Flash Count": "0",
+            "Flash Successes": "0", "Flash Success Rate per Match": "0",
+            "Enemies Flashed": "0", "Entry Count": "3", "Entry Wins": "0",
+            "Match Entry Success Rate": "0", "Match Entry Rate": "0.17",
+            "First Kills": "0", "Clutch Kills": "0", "1v1Wins": "0",
+            "Utility Damage per Round in a Match": "4.2",
+            "Enemies Flashed per Round in a Match": "0"}
+
+    def test_headline_metrics_all_resolve(self):
+        got = dict(faceit_stats.curated(self.LIVE))
+        missing = [l for l in faceit_stats.HEADLINE if l not in got]
+        assert not missing, missing
+
+    def test_fraction_rates_are_scaled_to_percent(self):
+        got = dict(faceit_stats.curated({"Match Entry Rate": "0.17"}))
+        assert got["Entries / round"] == pytest.approx(17.0)
+
+    def test_percentages_already_in_percent_are_untouched(self):
+        assert dict(faceit_stats.curated({"Headshots %": "17"}))["HS %"] == 17.0
+
+    def test_utility_and_flash_volume_are_available(self):
+        """These were the metrics I assumed the API lacked; it has them."""
+        got = dict(faceit_stats.curated(self.LIVE))
+        assert got["Utility thrown"] == 9.0
+        assert got["Flashes thrown"] == 0.0

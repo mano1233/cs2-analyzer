@@ -324,19 +324,20 @@ def build_player(matches, name, names, roles, generated):
 
 def curated_averages(avg):
     """[(label, value)] for recognised stats, tolerating the API's shifting key names."""
-    lower = {k.lower(): v for k, v in avg.items()}
+    lower = {k.lower(): (k, v) for k, v in avg.items()}
     out = []
     for label, candidates in faceit_stats.CURATED:
         for key in candidates:
             if key.lower() in lower:
-                out.append((label, lower[key.lower()]))
+                real_key, value = lower[key.lower()]
+                out.append((label, faceit_stats.scale(real_key, value)))
                 break
     return out
 
 
 def build_faceit(stats, generated, has_demos):
     avg = faceit_stats.averages(stats)
-    pairs = curated_averages(avg)
+    pairs = [(l, v) for l, v in curated_averages(avg) if l in faceit_stats.HEADLINE]
     cards = "".join(
         f'<div class="card"><span class="label">{esc(label)}</span>'
         f'<span class="value">{num(value, 1)}</span></div>'
@@ -347,7 +348,7 @@ def build_faceit(stats, generated, has_demos):
                   + (f'<div class="card"><span class="label">win rate</span>'
                      f'<span class="value">{num(win, 0)}%</span></div>' if win is not None else ""))
 
-    labels = [label for label, _ in faceit_stats.CURATED][:8]
+    labels = faceit_stats.HEADLINE
     rows = []
     for row in sorted(stats, key=lambda r: r.get("finished_at") or 0, reverse=True):
         got = dict(faceit_stats.curated(row.get("stats", {})))
