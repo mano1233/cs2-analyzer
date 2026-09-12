@@ -22,6 +22,7 @@ import ssl
 import sys
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import boto3
@@ -135,10 +136,10 @@ def fetch_faceit(state):
         return []
     log("%d match(es) in the last %d days" % (len(history), WINDOW_DAYS))
 
-    added = []
+    added, attempted = [], 0
     for item in history:
         mid = item.get("match_id")
-        if not mid or mid in done or len(added) >= MAX_PER_RUN:
+        if not mid or mid in done or attempted >= MAX_PER_RUN:
             continue
         try:
             urls = faceit("/matches/%s" % mid).get("demo_url") or []
@@ -151,6 +152,8 @@ def fetch_faceit(state):
             continue
         key = DEMO_PREFIX + mid + ".dem.zst"
         local = SCRATCH / (mid + ".dem.zst")
+        host = urllib.parse.urlsplit(urls[0]).hostname
+        attempted += 1
         try:
             urllib.request.urlretrieve(urls[0], local)
             s3().upload_file(str(local), BUCKET, key)
@@ -158,7 +161,7 @@ def fetch_faceit(state):
             added.append(key)
             done.add(mid)
         except Exception as e:
-            log("fetch failed for %s: %r" % (mid, e))
+            log("fetch failed for %s from %s: %r" % (mid, host, e))
         finally:
             local.unlink(missing_ok=True)
     state["faceit_matches"] = sorted(done)
