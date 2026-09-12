@@ -29,7 +29,8 @@ Beyond kills and damage, the things that actually explain lost rounds:
 |---|---|
 | `analyze.py` | The parser and all metrics. `analyze(dem)` returns one match; run directly for a per-match and pooled table. |
 | `team.py` | Team report: individual performance, role signals, per-half tables, trade/flash/proximity matrices. |
-| `cluster_run.py` | The CronJob entrypoint. Fetches new FACEIT demos, parses one at a time in scratch, writes results back to R2. |
+| `cluster_run.py` | The CronJob entrypoint. Fetches new FACEIT demos, parses one at a time in scratch, writes results back to R2, publishes the report. |
+| `report.py` | Renders `index.html` (headline metrics + per-match rows) and `team.html` (roles, per-half, trade/flash/distance matrices) from parsed results. |
 | `Dockerfile` | Multi-arch image (`linux/amd64`, `linux/arm64`). |
 
 ## Running locally
@@ -55,6 +56,9 @@ an unpacked `.dem`, so decompress first (`cluster_run.py` does this automaticall
 | `FACEIT_API_KEY` | Server-side FACEIT Data API key. Empty is valid: it then only parses demos already in the bucket |
 | `FACEIT_NICKNAME` | Whose matches to fetch and whose stats to track |
 | `MAX_PER_RUN` | Cap on demos downloaded and parsed per run |
+| `FACEIT_WINDOW_DAYS` | How far back to look for matches (default 21 - "the last three weeks", not a fixed match count) |
+| `REPORT_DIR` | Where the HTML is rendered before publishing |
+| `REPORT_CONFIGMAP` | ConfigMap to patch with the rendered pages; the web pod mounts it and kubelet re-syncs it, so nothing restarts |
 | `SCRATCH` | Scratch dir for one demo at a time (an `emptyDir` in the CronJob) |
 
 Output: `results/results.json` (full per-match, per-player counters) and

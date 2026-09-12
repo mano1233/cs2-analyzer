@@ -17,6 +17,7 @@ import io
 import json
 import os
 import pathlib
+import ssl
 import sys
 import traceback
 import urllib.error
@@ -26,6 +27,7 @@ import boto3
 import zstandard
 
 import analyze
+import report
 
 FACEIT_API = "https://open.faceit.com/data/v4"
 BUCKET = os.environ["R2_BUCKET"]
@@ -34,7 +36,12 @@ NICKNAME = os.environ.get("FACEIT_NICKNAME", "mirithefish")
 API_KEY = os.environ.get("FACEIT_API_KEY", "")
 SCRATCH = pathlib.Path(os.environ.get("SCRATCH", "/scratch"))
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "5"))
-HISTORY_LIMIT = int(os.environ.get("FACEIT_HISTORY_LIMIT", "20"))
+HISTORY_PAGE = int(os.environ.get("FACEIT_HISTORY_PAGE", "50"))
+WINDOW_DAYS = int(os.environ.get("FACEIT_WINDOW_DAYS", "21"))
+REPORT_DIR = pathlib.Path(os.environ.get("REPORT_DIR", "/tmp/report"))
+REPORT_CONFIGMAP = os.environ.get("REPORT_CONFIGMAP", "")
+
+SA = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount")
 
 STATE_KEY = "state/processed.json"
 RESULTS_KEY = "results/results.json"
@@ -86,6 +93,28 @@ def faceit(path):
         return json.loads(r.read())
 
 
+def faceit_history():
+    """Matches finished inside the window, newest first, following pagination.
+
+    A window rather than a fixed count: "the last three weeks" is what a person means
+    by recent form, and it stays right whether that was 3 matches or 30."""
+    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    since = now - WINDOW_DAYS * 24 * 3600
+    player = faceit("/players?nickname=%s&game=cs2" % NICKNAME)
+    items, offset = [], 0
+    while True:
+        page = faceit("/players/%s/history?game=cs2&from=%d&to=%d&offset=%d&limit=%d"
+                      % (player["player_id"], since, now, offset, HISTORY_PAGE))
+        batch = page.get("items", [])
+        items += batch
+        # FACEIT returns an empty page rather than a total, so stop on a short page.
+        if len(batch) < HISTORY_PAGE:
+            return items
+        offset += HISTORY_PAGE
+        if offset >= 500:   # guard against a pathological loop
+            return items
+
+
 def fetch_faceit(state):
     """Download demos for matches not yet seen. Returns list of new R2 demo keys."""
     if not API_KEY:
@@ -93,18 +122,17 @@ def fetch_faceit(state):
         return []
     done = set(state.get("faceit_matches", []))
     try:
-        player = faceit("/players?nickname=%s&game=cs2" % NICKNAME)
-        history = faceit("/players/%s/history?game=cs2&offset=0&limit=%d"
-                         % (player["player_id"], HISTORY_LIMIT))
+        history = faceit_history()
     except urllib.error.HTTPError as e:
         log("FACEIT API error %s %s" % (e.code, e.reason))
         return []
     except Exception as e:
         log("FACEIT API unreachable: %r" % (e,))
         return []
+    log("%d match(es) in the last %d days" % (len(history), WINDOW_DAYS))
 
     added = []
-    for item in history.get("items", []):
+    for item in history:
         mid = item.get("match_id")
         if not mid or mid in done or len(added) >= MAX_PER_RUN:
             continue
@@ -187,6 +215,45 @@ def append_trend(rows):
     s3.put_object(Bucket=BUCKET, Key=TREND_KEY, Body=buf.getvalue().encode(), ContentType="text/csv")
 
 
+def publish_report(results):
+    """Render the pages and push them into the ConfigMap the web pod mounts.
+
+    Kubelet re-syncs mounted ConfigMaps on its own, so the served pages update without
+    restarting anything. Raw HTTP against the API server rather than the kubernetes
+    client library: it is one PATCH, and the in-cluster token and CA are right there.
+    """
+    files = report.render(results, REPORT_DIR)
+    log("rendered %s" % ", ".join(f.name for f in files))
+    if not REPORT_CONFIGMAP:
+        return
+    payload = {f.name: f.read_text(encoding="utf-8") for f in files}
+    size = sum(len(v.encode()) for v in payload.values())
+    if size > 900_000:      # ConfigMaps cap at ~1 MiB including keys and metadata
+        log("report is %.0f KB, too close to the ConfigMap limit - not publishing" % (size / 1000))
+        return
+    try:
+        namespace = (SA / "namespace").read_text().strip()
+        token = (SA / "token").read_text().strip()
+    except OSError as e:
+        log("no service account mounted (%r) - skipping ConfigMap update" % (e,))
+        return
+    url = ("https://kubernetes.default.svc/api/v1/namespaces/%s/configmaps/%s"
+           % (namespace, REPORT_CONFIGMAP))
+    req = urllib.request.Request(
+        url, method="PATCH", data=json.dumps({"data": payload}).encode(),
+        headers={"Authorization": "Bearer " + token,
+                 "Content-Type": "application/merge-patch+json"})
+    ctx = ssl.create_default_context(cafile=str(SA / "ca.crt"))
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
+            log("updated ConfigMap %s/%s (%s, %.0f KB)"
+                % (namespace, REPORT_CONFIGMAP, r.status, size / 1000))
+    except urllib.error.HTTPError as e:
+        log("ConfigMap update failed %s: %s" % (e.code, e.read()[:300]))
+    except Exception as e:
+        log("ConfigMap update failed: %r" % (e,))
+
+
 def main():
     SCRATCH.mkdir(parents=True, exist_ok=True)
     state = get_json(STATE_KEY, {})
@@ -228,6 +295,7 @@ def main():
 
     put_json(RESULTS_KEY, results)
     append_trend(rows)
+    publish_report(results)
     state["demos"] = sorted(seen)
     put_json(STATE_KEY, state)
     log("done: %d parsed this run, %d tracked overall" % (len(rows), len(seen)))

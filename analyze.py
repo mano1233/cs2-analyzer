@@ -339,6 +339,105 @@ def pool(dicts):
     return tot
 
 
+
+# ---- shared team helpers (used by team.py and report.py) --------------------
+
+def roster(matches, me=ME, min_share=0.5):
+    """Stack-mates present in at least half the matches, me first. Stand-ins drop out."""
+    seen = defaultdict(int)
+    for m in matches:
+        for n in m.get("stack", []):
+            seen[n] += 1
+    mates = [n for n, c in seen.items() if c >= len(matches) * min_share and n != me]
+    return [me] + sorted(mates, key=lambda n: (-seen[n], n))
+
+
+def pooled_players(matches, names):
+    return {n: pool(m["players"][n] for m in matches if n in m["players"]) for n in names}
+
+
+def role_signals(s):
+    """What a player actually does per round - the inputs to the role rule."""
+    s = defaultdict(float, s)
+    r = max(s["rounds"], 1)
+    div = lambda a, b: a / b if b else float("nan")
+    return {
+        "rounds": int(s["rounds"]),
+        "first_contact/r": (s["open_won"] + s["open_lost"]) / r,
+        "T open/r": div(s["t_open_won"] + s["t_open_lost"], max(s["t_rounds"], 1)),
+        "CT open/r": div(s["ct_open_won"] + s["ct_open_lost"], max(s["ct_rounds"], 1)),
+        "util/r": s["util_thrown"] / r,
+        "smokes+flashes/r": (s["smokes"] + s["flashes"]) / r,
+        "AWP kill share": div(s["awp_kills"], s["kills"]),
+        "trade kills/r": s["trade_kills"] / r,
+        "avg death time (s)": div(s["death_time_sum"], s["deaths"]),
+        "survival%": 100 * (1 - div(s["deaths"], r)),
+    }
+
+
+def assign_roles(sig):
+    """Roles from measured behaviour. The rule is deliberately simple and stated in
+    the output, so a player can disagree with it rather than be labelled silently."""
+    names = list(sig)
+    med = lambda key: sorted(sig[n][key] for n in names)[len(names) // 2]
+    top_entry = max(sig[n]["T open/r"] for n in names)
+    roles = {}
+    for n in names:
+        g = sig[n]
+        if g["AWP kill share"] >= 0.20:
+            roles[n] = "AWP"
+        elif g["T open/r"] == top_entry and g["T open/r"] >= 0.15:
+            roles[n] = "Entry"
+        elif g["util/r"] >= med("util/r") and g["smokes+flashes/r"] >= med("smokes+flashes/r"):
+            roles[n] = "Support"
+        elif g["avg death time (s)"] >= med("avg death time (s)") and g["first_contact/r"] <= med("first_contact/r"):
+            roles[n] = "Lurk / late"
+        else:
+            roles[n] = "Rifler"
+    return roles
+
+
+ROLE_RULE = ("AWP if at least 20% of kills come with the AWP; else Entry for the highest "
+             "T-side first-contact rate (and at least 0.15/round); else Support if both "
+             "utility per round and smokes+flashes per round are at or above the team "
+             "median; else Lurk/late for dying later than the median with below-median "
+             "first contact; else Rifler.")
+
+ROLE_KPIS = {
+    "Entry": ["open W/L", "traded death%", "moving 1st shot%", "accuracy%", "ADR"],
+    "Support": ["util thrown/r", "flash hit% (>=1 enemy)", "flash->kill", "util before 1st kill%",
+                "died holding util%", "avg util time T (s)"],
+    "AWP": ["open W/L", "accuracy%", "ADR", "K/D"],
+    "Lurk / late": ["trade kills/r", "traded death%", "K/D", "ADR"],
+    "Rifler": ["ADR", "HS%", "accuracy%", "trade kills/r", "K/D"],
+}
+
+
+def pair_matrix(matches, key, names, mean=False):
+    """Pair values over the roster: rows act on columns. mean=True averages prox_sum
+    over prox_n (metres); otherwise counts are summed."""
+    tot = defaultdict(lambda: defaultdict(float))
+    cnt = defaultdict(lambda: defaultdict(float))
+    for m in matches:
+        for a, row in m.get("prox_sum" if mean else key, {}).items():
+            for b, v in row.items():
+                tot[a][b] += v
+        if mean:
+            for a, row in m.get("prox_n", {}).items():
+                for b, v in row.items():
+                    cnt[a][b] += v
+    out = {}
+    for a in names:
+        out[a] = {}
+        for b in names:
+            if a == b:
+                out[a][b] = None
+            elif mean:
+                out[a][b] = (tot[a][b] / cnt[a][b] * UNIT_M) if cnt[a][b] else None
+            else:
+                out[a][b] = tot[a][b]
+    return out
+
 if __name__ == "__main__":
     import sys
     if "--cached" in sys.argv:
