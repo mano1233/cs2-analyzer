@@ -34,6 +34,11 @@ PISTOLS = {"glock", "usp_silencer", "hkp2000", "p250", "fiveseven", "tec9", "cz7
            "deagle", "revolver", "elite", "p228"}
 T_SIDE, CT_SIDE = 2, 3
 
+# Economy buckets by team equipment value at freeze end. Conventions, not truths -
+# named here so a page can say which thresholds it used.
+ECO_MAX, FORCE_MAX = 5000, 20000
+BUCKETS = ("eco", "force", "full")
+
 
 def norm(w):
     w = str(w).lower()
@@ -102,6 +107,51 @@ def analyze(dem):
     enemy_hurt = H.attacker_team_num != H.user_team_num
     first_death = D.sort_values("tick").groupby("r").first()
     has_weapon = "weapon" in D.columns
+
+    # ---- per-round table -----------------------------------------------------
+    # One row per round, from which the opening-kill, post-plant and economy
+    # metrics are all aggregations. Round-level data also lets the rollup answer
+    # questions the per-player counters cannot.
+    plants = get("bomb_planted", player=["team_num", "X", "Y", "Z"])
+    defuses = get("bomb_defused", player=["team_num"])
+    equip = p.parse_ticks(["current_equip_value", "team_num"], ticks=[int(x) for x in freeze])
+    equip["r"] = np.searchsorted(freeze, equip.tick.to_numpy())
+    team_equip = {(int(r), int(team)): float(v) for (r, team), v
+                  in equip.groupby(["r", "team_num"]).current_equip_value.sum().items()}
+
+    def bucket(value):
+        if value < ECO_MAX:
+            return "eco"
+        return "force" if value < FORCE_MAX else "full"
+
+    rounds = []
+    for r in range(n_rounds):
+        fd = first_death.loc[r] if r in first_death.index else None
+        plant = plants[plants.r == r] if len(plants) else plants
+        defuse = defuses[defuses.r == r] if len(defuses) else defuses
+        row = {
+            "round": r + 1,
+            "half": 1 if r < 12 else (2 if r < 24 else 3),
+            "winner": winners[r],
+            "opening_kill_team": (int(fd.attacker_team_num)
+                                  if fd is not None and fd.attacker_team_num == fd.attacker_team_num
+                                  else None),
+            "opening_killer": None if fd is None else fd.attacker_name,
+            "opening_victim": None if fd is None else fd.user_name,
+            "opening_time": None if fd is None else float(fd.t),
+            "planted": bool(len(plant)),
+            "plant_site": int(plant.iloc[0].site) if len(plant) else None,
+            "plant_x": float(plant.iloc[0].user_X) if len(plant) else None,
+            "plant_y": float(plant.iloc[0].user_Y) if len(plant) else None,
+            "plant_z": float(plant.iloc[0].user_Z) if len(plant) else None,
+            "plant_time": float(plant.iloc[0].t) if len(plant) else None,
+            "defused": bool(len(defuse)),
+        }
+        for side, tag in ((T_SIDE, "t"), (CT_SIDE, "ct")):
+            value = team_equip.get((r, side), 0.0)
+            row[f"{tag}_equip"] = value
+            row[f"{tag}_bucket"] = bucket(value)
+        rounds.append(row)
 
     # ---- pair matrices -------------------------------------------------------
     # traded_for[A][B]: A killed the player who had just killed teammate B
@@ -220,6 +270,25 @@ def analyze(dem):
             s[f"util_n_{tag}"] += 1
         s["util_owned"] = int(T[T.name == name].inventory.map(n_util).sum())
 
+        # Time to first contact: first moment in the round this player deals or
+        # takes damage. Pairs with the utility-timing numbers - first contact at
+        # 20s while your first utility lands at 45s means you threw it too late.
+        contact = H[(H.attacker_name == name) | (H.user_name == name)]
+        for r_, first_t in contact.groupby("r").t.min().items():
+            side = team_of.get((int(r_), name))
+            tag = "t" if side == T_SIDE else "ct"
+            s[f"first_contact_sum_{tag}"] += float(first_t)
+            s[f"first_contact_n_{tag}"] += 1
+
+        # This player's own opening duels, and whether the round was then won.
+        for row in rounds:
+            if row["opening_killer"] == name:
+                s["own_opening_kills"] += 1
+                s["own_opening_kill_wins"] += int(team_of.get((row["round"] - 1, name)) == row["winner"])
+            if row["opening_victim"] == name:
+                s["own_opening_deaths"] += 1
+                s["own_opening_death_wins"] += int(team_of.get((row["round"] - 1, name)) == row["winner"])
+
         eff_flashes = B[(B.attacker_name == name) & (B.user_team_num != B.attacker_team_num)
                         & (B.blind_duration >= EFFECTIVE_BLIND)]
 
@@ -274,6 +343,7 @@ def analyze(dem):
 
     pack = lambda m: {a: dict(b) for a, b in m.items()}
     return {"demo": dem.name, "map": mapname, "rounds": n_rounds, "stack": stack,
+            "round_table": rounds,
             "players": out, "traded_for": pack(traded_for), "flash_conv": pack(flash_conv),
             "prox_sum": pack(prox_sum), "prox_n": pack(prox_n)}
 
@@ -411,6 +481,98 @@ ROLE_KPIS = {
     "Lurk / late": ["trade kills/r", "traded death%", "K/D", "ADR"],
     "Rifler": ["ADR", "HS%", "accuracy%", "trade kills/r", "K/D"],
 }
+
+
+def round_metrics(matches, side=None):
+    """Team metrics aggregated over the per-round tables of several matches.
+
+    `side` limits to T (2) or CT (3) from the perspective of that side; None returns
+    both sides' numbers keyed by side. The opening kill is what creates the 5v4, so
+    conversion and save rate are one computation with two outputs.
+    """
+    rows = [r for m in matches for r in m.get("round_table", [])]
+    out = {"rounds": len(rows)}
+    if not rows:
+        return out
+
+    for tag, team in (("t", T_SIDE), ("ct", CT_SIDE)):
+        if side is not None and team != side:
+            continue
+        got_opening = [r for r in rows if r["opening_kill_team"] == team]
+        lost_opening = [r for r in rows if r["opening_kill_team"] not in (team, None)]
+        won = lambda rs: 100 * sum(1 for r in rs if r["winner"] == team) / len(rs) if rs else float("nan")
+        out[f"{tag}_rounds"] = sum(1 for r in rows if True)
+        out[f"{tag}_opening_kills"] = len(got_opening)
+        out[f"{tag}_opening_conversion%"] = won(got_opening)
+        out[f"{tag}_opening_deaths"] = len(lost_opening)
+        out[f"{tag}_save_after_opening_death%"] = won(lost_opening)
+
+        for b in BUCKETS:
+            in_bucket = [r for r in rows if r[f"{tag}_bucket"] == b]
+            out[f"{tag}_{b}_rounds"] = len(in_bucket)
+            out[f"{tag}_{b}_win%"] = won(in_bucket)
+
+    planted = [r for r in rows if r["planted"]]
+    out["plants"] = len(planted)
+    out["plant_rate%"] = 100 * len(planted) / len(rows)
+    out["post_plant_t_win%"] = (100 * sum(1 for r in planted if r["winner"] == T_SIDE) / len(planted)
+                                if planted else float("nan"))
+    out["defuse_rate%"] = (100 * sum(1 for r in planted if r["defused"]) / len(planted)
+                           if planted else float("nan"))
+    out["sites"] = plant_sites(matches)
+    return out
+
+
+def plant_sites(matches, max_spread=600.0):
+    """Bomb sites per map, clustered from plant coordinates.
+
+    The demo's `site` field is an entity index that changes between demos of the same
+    map - six demos over four maps produced twelve distinct ids - so it cannot identify
+    a site. Plant coordinates can: the two sites on a map are hundreds of units apart,
+    far beyond where individual plants scatter.
+
+    Nuke is the exception that shapes this: its sites are stacked vertically, only a
+    few hundred units apart in X/Y but far apart in Z, so height is included in the
+    distance.
+
+    Returns {map: [{x, y, z, plants, t_win%, defused%}]}, ordered by plant count. Naming
+    them A and B is a one-time human judgement per map, not something to guess here.
+    """
+    by_map = defaultdict(list)
+    for m in matches:
+        for r in m.get("round_table", []):
+            if r["planted"] and r["plant_x"] is not None:
+                by_map[m["map"]].append(r)
+
+    out = {}
+    for mapname, plants in by_map.items():
+        xs = sorted(plants, key=lambda r: r["plant_x"])
+        far = max(plants, key=lambda r: (r["plant_x"] - xs[0]["plant_x"]) ** 2
+                                        + (r["plant_y"] - xs[0]["plant_y"]) ** 2
+                                        + (r.get("plant_z") or 0 - (xs[0].get("plant_z") or 0)) ** 2)
+        seeds = [(xs[0]["plant_x"], xs[0]["plant_y"], xs[0].get("plant_z") or 0.0),
+                 (far["plant_x"], far["plant_y"], far.get("plant_z") or 0.0)]
+        # Two far-apart seeds and one assignment pass: sites are separated by far more
+        # than max_spread, so iterating to convergence buys nothing.
+        groups = [[], []]
+        for r in plants:
+            d = [((r["plant_x"] - sx) ** 2 + (r["plant_y"] - sy) ** 2
+                  + ((r.get("plant_z") or 0.0) - sz) ** 2) ** 0.5 for sx, sy, sz in seeds]
+            groups[0 if d[0] <= d[1] else 1].append(r)
+        clusters = []
+        for g in groups:
+            if not g:
+                continue
+            clusters.append({
+                "x": round(sum(r["plant_x"] for r in g) / len(g)),
+                "y": round(sum(r["plant_y"] for r in g) / len(g)),
+                "z": round(sum(r.get("plant_z") or 0.0 for r in g) / len(g)),
+                "plants": len(g),
+                "t_win%": 100 * sum(1 for r in g if r["winner"] == T_SIDE) / len(g),
+                "defused%": 100 * sum(1 for r in g if r["defused"]) / len(g),
+            })
+        out[mapname] = sorted(clusters, key=lambda c: -c["plants"])
+    return out
 
 
 def pair_matrix(matches, key, names, mean=False):

@@ -50,6 +50,10 @@ DOWNLOADS_API = "https://open.faceit.com/download/v2/demos/download"
 SCRATCH = pathlib.Path(os.environ.get("SCRATCH", "/scratch"))
 MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "5"))
 HISTORY_PAGE = int(os.environ.get("FACEIT_HISTORY_PAGE", "50"))
+# The job now runs every 15 minutes so an uploaded demo is parsed promptly, but the
+# FACEIT stats only change when a match ends - syncing them every run would mean ~96
+# passes over the window a day for no new data.
+STATS_MIN_INTERVAL = int(os.environ.get("FACEIT_STATS_MIN_INTERVAL_MIN", "60")) * 60
 WINDOW_DAYS = int(os.environ.get("FACEIT_WINDOW_DAYS", "21"))
 REPORT_DIR = pathlib.Path(os.environ.get("REPORT_DIR", "/tmp/report"))
 REPORT_CONFIGMAP = os.environ.get("REPORT_CONFIGMAP", "")
@@ -257,12 +261,19 @@ def append_trend(rows):
     s3().put_object(Bucket=BUCKET, Key=TREND_KEY, Body=buf.getvalue().encode(), ContentType="text/csv")
 
 
-def sync_stats():
+def sync_stats(state):
     """Per-match stats from the API. Independent of demos: this is what keeps the trend
-    current when no demo has been uploaded."""
+    current when no demo has been uploaded. Rate-limited to STATS_MIN_INTERVAL."""
     if not (FETCH_STATS and API_KEY):
         return []
     known = get_json(STATS_KEY, [])
+    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    last = int(state.get("last_stats_sync", 0))
+    if now - last < STATS_MIN_INTERVAL:
+        log("stats synced %d min ago - skipping (min interval %d min)"
+            % ((now - last) // 60, STATS_MIN_INTERVAL // 60))
+        return known
+    state["last_stats_sync"] = now
     seen = {r.get("match_id") for r in known}
     try:
         fresh = faceit_stats.collect(NICKNAME, API_KEY, WINDOW_DAYS, log=log, seen=seen)
@@ -338,7 +349,7 @@ def main():
 
     fetch_faceit(state)
     put_json(STATE_KEY, state)   # persist match ids even if parsing later fails
-    stats = sync_stats()
+    stats = sync_stats(state)
 
     pending = [k for k in list_keys(DEMO_PREFIX) if k not in seen][:MAX_PER_RUN]
     log("%d demo(s) to parse" % len(pending))

@@ -117,3 +117,36 @@ class TestDownloadsGate:
         assert cluster_run.fetch_faceit({}) == []
         assert not called
         assert any("FACEIT_DOWNLOADS_TOKEN" in m for m in logged)
+
+
+class TestStatsInterval:
+    def test_stats_are_skipped_when_synced_recently(self, monkeypatch):
+        """The job runs every 15 minutes; the API window only changes when a match ends."""
+        import datetime as dt
+        monkeypatch.setattr(cluster_run, "FETCH_STATS", True)
+        monkeypatch.setattr(cluster_run, "API_KEY", "key")
+        monkeypatch.setattr(cluster_run, "get_json", lambda key, default: default)
+        called = []
+        monkeypatch.setattr(cluster_run.faceit_stats, "collect",
+                            lambda *a, **k: called.append(1) or [])
+        logged = []
+        monkeypatch.setattr(cluster_run, "log", logged.append)
+        now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        cluster_run.sync_stats({"last_stats_sync": now - 600})   # 10 minutes ago
+        assert not called
+        assert any("skipping" in m for m in logged)
+
+    def test_stats_run_when_the_interval_has_passed(self, monkeypatch):
+        import datetime as dt
+        monkeypatch.setattr(cluster_run, "FETCH_STATS", True)
+        monkeypatch.setattr(cluster_run, "API_KEY", "key")
+        monkeypatch.setattr(cluster_run, "get_json", lambda key, default: default)
+        monkeypatch.setattr(cluster_run, "put_json", lambda key, obj: None)
+        called = []
+        monkeypatch.setattr(cluster_run.faceit_stats, "collect",
+                            lambda *a, **k: called.append(1) or [])
+        monkeypatch.setattr(cluster_run, "log", lambda m: None)
+        state = {"last_stats_sync": int(dt.datetime.now(dt.timezone.utc).timestamp()) - 7200}
+        cluster_run.sync_stats(state)
+        assert called
+        assert state["last_stats_sync"] > 0
