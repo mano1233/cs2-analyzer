@@ -13,6 +13,7 @@ of the bucket by lifecycle rule; the parsed results stay.
 """
 import csv
 import datetime as dt
+import functools
 import io
 import json
 import os
@@ -30,8 +31,8 @@ import analyze
 import report
 
 FACEIT_API = "https://open.faceit.com/data/v4"
-BUCKET = os.environ["R2_BUCKET"]
-ENDPOINT = os.environ["R2_ENDPOINT"]
+BUCKET = os.environ.get("R2_BUCKET", "")
+ENDPOINT = os.environ.get("R2_ENDPOINT", "")
 NICKNAME = os.environ.get("FACEIT_NICKNAME", "mirithefish")
 API_KEY = os.environ.get("FACEIT_API_KEY", "")
 SCRATCH = pathlib.Path(os.environ.get("SCRATCH", "/scratch"))
@@ -52,7 +53,10 @@ TREND_FIELDS = ["date", "source", "map", "rounds", "result", "moving_1st_shot_pc
                 "accuracy_pct", "adr", "first_duels_won_pct", "flash_hit_pct",
                 "util_per_round", "util_used_pct", "t_util_time_s", "demo"]
 
-s3 = boto3.client("s3", endpoint_url=ENDPOINT, region_name="auto")
+@functools.lru_cache(maxsize=1)
+def s3():
+    """Built on first use, not at import: the endpoint is only valid in the cluster."""
+    return boto3.client("s3", endpoint_url=ENDPOINT, region_name="auto")
 
 
 def log(msg):
@@ -61,8 +65,8 @@ def log(msg):
 
 def get_json(key, default):
     try:
-        return json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read())
-    except s3.exceptions.NoSuchKey:
+        return json.loads(s3().get_object(Bucket=BUCKET, Key=key)["Body"].read())
+    except s3().exceptions.NoSuchKey:
         return default
     except Exception as e:
         log("could not read %s (%r) - treating as empty" % (key, e))
@@ -70,7 +74,7 @@ def get_json(key, default):
 
 
 def put_json(key, obj):
-    s3.put_object(Bucket=BUCKET, Key=key, Body=json.dumps(obj, indent=1, default=float).encode(),
+    s3().put_object(Bucket=BUCKET, Key=key, Body=json.dumps(obj, indent=1, default=float).encode(),
                   ContentType="application/json")
 
 
@@ -80,7 +84,7 @@ def list_keys(prefix):
         kw = {"Bucket": BUCKET, "Prefix": prefix}
         if token:
             kw["ContinuationToken"] = token
-        page = s3.list_objects_v2(**kw)
+        page = s3().list_objects_v2(**kw)
         keys += [o["Key"] for o in page.get("Contents", [])]
         if not page.get("IsTruncated"):
             return keys
@@ -149,7 +153,7 @@ def fetch_faceit(state):
         local = SCRATCH / (mid + ".dem.zst")
         try:
             urllib.request.urlretrieve(urls[0], local)
-            s3.upload_file(str(local), BUCKET, key)
+            s3().upload_file(str(local), BUCKET, key)
             log("stored %s (%.0f MB)" % (key, local.stat().st_size / 1e6))
             added.append(key)
             done.add(mid)
@@ -201,7 +205,7 @@ def append_trend(rows):
     if not rows:
         return
     try:
-        existing = s3.get_object(Bucket=BUCKET, Key=TREND_KEY)["Body"].read().decode()
+        existing = s3().get_object(Bucket=BUCKET, Key=TREND_KEY)["Body"].read().decode()
     except Exception:
         existing = ""
     buf = io.StringIO()
@@ -212,7 +216,7 @@ def append_trend(rows):
         w.writeheader()
     for row in rows:
         w.writerow(row)
-    s3.put_object(Bucket=BUCKET, Key=TREND_KEY, Body=buf.getvalue().encode(), ContentType="text/csv")
+    s3().put_object(Bucket=BUCKET, Key=TREND_KEY, Body=buf.getvalue().encode(), ContentType="text/csv")
 
 
 def publish_report(results):
@@ -255,6 +259,9 @@ def publish_report(results):
 
 
 def main():
+    if not BUCKET or not ENDPOINT:
+        log("R2_BUCKET and R2_ENDPOINT must be set")
+        return 2
     SCRATCH.mkdir(parents=True, exist_ok=True)
     state = get_json(STATE_KEY, {})
     seen = set(state.get("demos", []))
@@ -271,7 +278,7 @@ def main():
         archive = SCRATCH / pathlib.Path(key).name
         dem = None
         try:
-            s3.download_file(BUCKET, key, str(archive))
+            s3().download_file(BUCKET, key, str(archive))
             dem = unpack(archive) if archive.suffix in (".zst", ".bz2") else archive
             log("parsing %s (%.0f MB unpacked)" % (key, dem.stat().st_size / 1e6))
             match = analyze.analyze(dem)

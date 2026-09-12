@@ -59,3 +59,17 @@ def test_requirements_are_bounded():
 
 def test_image_runs_as_a_non_root_user():
     assert re.search(r"^USER \w+", DOCKERFILE, re.M), "no USER line: container would run as root"
+
+
+def test_modules_import_without_configuration():
+    """Importing must not read files, build clients, or need env: the build-time check,
+    the tests and anyone debugging locally all import these before configuring anything.
+    team.py used to read results.json at import and cluster_run built its S3 client."""
+    import subprocess
+    import sys
+    r = subprocess.run(
+        [sys.executable, "-c", "import analyze, report, team, cluster_run"],
+        cwd=ROOT, capture_output=True, text=True,
+        env={"PATH": __import__("os").environ.get("PATH", ""),
+             "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")})
+    assert r.returncode == 0, r.stderr[-800:]
