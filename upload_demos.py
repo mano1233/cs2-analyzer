@@ -27,14 +27,21 @@ ENDPOINT = os.environ.get("R2_ENDPOINT", "")
 DEMO_PREFIX = "demos/"
 SUFFIXES = (".dem", ".dem.zst", ".dem.bz2")
 COMPRESS_LEVEL = 10          # ~29% smaller; the demo is already packed binary
+# Downloads is redirected to D: on this machine, so both candidates are listed and
+# missing ones are skipped. --dirs overrides all of this.
 DEFAULT_DIRS = [
     pathlib.Path.home() / "Downloads",
+    pathlib.Path(r"D:\Users\emanu\Downloads"),
+    pathlib.Path(r"C:\Users\emanu\cs2-demos"),
     pathlib.Path(r"C:\Program Files (x86)\Steam\steamapps\common"
                  r"\Counter-Strike Global Offensive\game\csgo\replays"),
 ]
 
 
-def demo_dirs():
+def demo_dirs(explicit=None):
+    """--dirs wins, then DEMO_DIRS, then the defaults."""
+    if explicit:
+        return [pathlib.Path(d) for d in explicit]
     raw = os.environ.get("DEMO_DIRS", "")
     if raw:
         return [pathlib.Path(p) for p in raw.split(os.pathsep) if p]
@@ -97,9 +104,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="list what would upload")
     ap.add_argument("--delete-after", action="store_true",
                     help="remove the local demo once it is in the bucket")
+    ap.add_argument("--dirs", nargs="+", metavar="DIR",
+                    help="folders to scan; overrides DEMO_DIRS and the defaults")
     args = ap.parse_args()
 
-    dirs = demo_dirs()
+    dirs = demo_dirs(args.dirs)
     demos = find_demos(dirs)
     print("scanning: %s" % ", ".join(str(d) for d in dirs))
     print("found %d demo(s)" % len(demos))
