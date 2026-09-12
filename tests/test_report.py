@@ -8,6 +8,21 @@ import report
 from tests.test_analyze import counters
 
 
+def round_row(n, won=True, **over):
+    """One row of the per-round table, shaped as analyze.analyze writes it."""
+    row = {"round": n, "half": 1 if n < 13 else 2,
+           "winner": analyze.T_SIDE if won else analyze.CT_SIDE,
+           "opening_kill_team": analyze.T_SIDE, "opening_killer": analyze.ME,
+           "opening_victim": "enemy", "opening_time": 12.5,
+           "planted": True, "defused": False,
+           "plant_site": 301, "plant_x": 100.0, "plant_y": 200.0, "plant_z": 0.0,
+           "plant_time": 40.0,
+           "t_equip": 22000.0, "t_bucket": "full",
+           "ct_equip": 3000.0, "ct_bucket": "eco"}
+    row.update(over)
+    return row
+
+
 def make_match(names, map_name="de_anubis", rounds=24, **extra):
     players = {n: dict(counters(rounds=rounds, rounds_won=13)) for n in names}
     m = {"demo": "1-abc.dem", "map": map_name, "rounds": rounds,
@@ -24,17 +39,32 @@ def matches():
 
 
 class TestRender:
-    def test_writes_a_page_per_player_plus_index_and_team(self, matches, tmp_path):
-        written = report.render(matches, tmp_path)
-        names = {f.name for f in written}
-        assert {"index.html", "team.html"} <= names
+    def test_writes_the_overview_and_a_page_per_player(self, matches, tmp_path):
+        """Three levels (DEV-60): overview, player, match. No standalone team page -
+        the overview is the team page."""
+        names = {f.name for f in report.render(matches, tmp_path)}
+        assert "index.html" in names
+        assert "team.html" not in names
         assert "player-mirithefish.html" in names
-        assert len(names) == 5
+        assert sum(1 for n in names if n.startswith("player-")) == 3
+
+    def test_a_match_with_rounds_gets_its_own_page(self, tmp_path):
+        m = make_match([analyze.ME, "LipT0N"], source_key="demos/1-abc-1-1.dem.zst",
+                       started_side={analyze.ME: analyze.T_SIDE, "LipT0N": analyze.T_SIDE},
+                       round_table=[round_row(1), round_row(2, won=False)])
+        names = {f.name for f in report.render([m], tmp_path)}
+        assert "match-1-abc.html" in names
+
+    def test_a_match_without_a_round_table_gets_no_match_page(self, matches, tmp_path):
+        """Matches parsed before DEV-53 carry no rounds; they must not render an
+        empty shell that looks like a match with nothing in it."""
+        names = {f.name for f in report.render(matches, tmp_path)}
+        assert not any(n.startswith("match-") for n in names)
 
     def test_pages_are_not_empty_and_name_the_player(self, matches, tmp_path):
         report.render(matches, tmp_path)
         assert analyze.ME in (tmp_path / "index.html").read_text(encoding="utf-8")
-        assert "LipT0N" in (tmp_path / "team.html").read_text(encoding="utf-8")
+        assert "LipT0N" in (tmp_path / "index.html").read_text(encoding="utf-8")
 
     def test_no_matches_still_produces_a_page(self, tmp_path):
         """An empty bucket must not leave the served site broken."""
@@ -45,6 +75,21 @@ class TestRender:
     def test_matches_without_the_owner_are_ignored(self, tmp_path):
         written = report.render([make_match(["someone", "else"])], tmp_path)
         assert [f.name for f in written] == ["index.html"]
+
+    def test_match_pages_are_capped_so_the_report_never_stops_publishing(self, tmp_path, monkeypatch):
+        """The whole site ships in one ConfigMap and the publisher refuses above ~900 KB.
+        Losing the oldest match page is survivable; the report silently ceasing to
+        update is not. Older matches stay in every aggregate, just unlinked."""
+        monkeypatch.setattr(report, "MAX_MATCH_PAGES", 2)
+        made = [make_match([analyze.ME, "LipT0N"],
+                           source_key="demos/1-m%d-1-1.dem.zst" % i,
+                           started_side={analyze.ME: analyze.T_SIDE, "LipT0N": analyze.T_SIDE},
+                           round_table=[round_row(1)]) for i in range(5)]
+        names = {f.name for f in report.render(made, tmp_path)}
+        assert sum(1 for n in names if n.startswith("match-")) == 2
+        index = (tmp_path / "index.html").read_text(encoding="utf-8")
+        assert index.count("match-") >= 2          # the recent ones are linked
+        assert "1-m0" not in index                 # the oldest lost its link, not its row
 
     def test_output_stays_far_below_the_configmap_ceiling(self, matches, tmp_path):
         total = sum(f.stat().st_size for f in report.render(matches, tmp_path))
@@ -57,7 +102,7 @@ class TestEscaping:
         hostile = '<script>alert(1)</script>'
         m = make_match([analyze.ME, hostile])
         report.render([m, make_match([analyze.ME, hostile])], tmp_path)
-        page = (tmp_path / "team.html").read_text(encoding="utf-8")
+        page = (tmp_path / "index.html").read_text(encoding="utf-8")
         assert "<script>alert(1)</script>" not in page
         assert "&lt;script&gt;" in page
 
@@ -75,10 +120,10 @@ class TestEscaping:
 
 class TestFormatting:
     def test_nan_renders_as_a_dash_not_the_word_nan(self):
-        assert report.num(float("nan")) == "-"
+        assert report.num(float("nan")) == "&mdash;"
 
     def test_none_renders_as_the_given_dash(self):
-        assert report.num(None, dash="&mdash;") == "&mdash;"
+        assert report.num(None, dash="n/a") == "n/a"
 
     def test_numbers_keep_the_requested_precision(self):
         assert report.num(12.3456, 1) == "12.3"
