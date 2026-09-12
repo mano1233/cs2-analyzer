@@ -47,6 +47,12 @@ DOWNLOADS_TOKEN = os.environ.get("FACEIT_DOWNLOADS_TOKEN", "")
 # Demo pulling is off by default: it cannot work without Downloads API access, and
 # demos arrive by upload instead. Stats need no such permission, so they stay on.
 FETCH_DEMOS = os.environ.get("FACEIT_FETCH_DEMOS", "0").lower() in ("1", "true", "yes")
+# Deleting a parsed demo is the only thing that removes data from the bucket, so it is
+# off unless asked for, and it happens here rather than as a lifecycle rule on the
+# prefix: a rule sweeps by age and cannot tell a demo from a stats file that moved.
+# Keeping demos is what makes a metric fix applicable to history - a demo that is gone
+# can never be re-parsed, so every future metric starts from the day it shipped.
+DELETE_PARSED_DEMOS = os.environ.get("DELETE_PARSED_DEMOS", "0").lower() in ("1", "true", "yes")
 FETCH_STATS = os.environ.get("FACEIT_FETCH_STATS", "1").lower() in ("1", "true", "yes")
 DOWNLOADS_API = "https://open.faceit.com/download/v2/demos/download"
 SCRATCH = pathlib.Path(os.environ.get("SCRATCH", "/scratch"))
@@ -335,7 +341,10 @@ def sync_stats(state):
 
 def write_artifacts(match, key, stats):
     """Canonical per-match files. Written before anything derived, so a later rollup or
-    render can be rebuilt from them without the demo - which is deleted after parsing."""
+    render can be rebuilt from them without the demo.
+
+    Returns whether they landed: nothing deletes a demo whose artifacts did not.
+    """
     match_id = artifacts.match_id_from(key)
     rows = [r for r in (stats or []) if r.get("match_id") == match_id]
     finished = rows[0].get("finished_at") if rows else None
@@ -352,8 +361,10 @@ def write_artifacts(match, key, stats):
         for name, obj in files.items():
             put_json(prefix + name, obj)
         log("  wrote %d artifact file(s) under %s" % (len(files), prefix))
+        return True
     except Exception:
         log("  artifact write failed: %s" % traceback.format_exc().splitlines()[-1])
+        return False
 
 
 def write_rollup(results, stats):
@@ -443,7 +454,7 @@ def main():
             match = analyze.analyze(dem)
             match["source_key"] = key
             results[match_key(match)] = match
-            write_artifacts(match, key, stats)
+            archived = write_artifacts(match, key, stats)
             row = row_for(match, key)
             if row:
                 rows.append(row)
@@ -453,6 +464,9 @@ def main():
             else:
                 log("  %s not in this demo" % analyze.ME)
             seen.add(key)
+            if DELETE_PARSED_DEMOS and archived:
+                s3().delete_object(Bucket=BUCKET, Key=key)
+                log("  deleted %s (DELETE_PARSED_DEMOS)" % key)
         except BaseException as e:
             # Not `except Exception`: demoparser2 is a Rust extension, and a malformed
             # demo panics rather than raising. pyo3 surfaces that as a PanicException,
