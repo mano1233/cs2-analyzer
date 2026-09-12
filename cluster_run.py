@@ -270,6 +270,19 @@ def sync_stats():
         log("FACEIT stats sync failed: %r" % (e,))
         return known
     if fresh:
+        # The stat keys are undocumented and have changed before, so log what FACEIT
+        # actually returned. This is the only place the real schema is visible.
+        keys = sorted({k for row in fresh for k in row.get("stats", {})})
+        log("FACEIT stats: %d key(s) returned: %s" % (len(keys), ", ".join(keys)))
+        sample = next((r for r in fresh if r.get("stats")), None)
+        if sample:
+            shown = ", ".join("%s=%s" % (k, sample["stats"][k])
+                              for k in sorted(sample["stats"])[:40])
+            log("FACEIT stats: sample %s on %s -> %s"
+                % (sample.get("nickname"), sample.get("map"), shown))
+        unmatched = sorted(set(keys) - {k for _, cands in faceit_stats.CURATED for k in cands})
+        if unmatched:
+            log("FACEIT stats: not in the curated view: %s" % ", ".join(unmatched))
         known = known + fresh
         put_json(STATS_KEY, known)
     return known
