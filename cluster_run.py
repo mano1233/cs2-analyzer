@@ -31,6 +31,7 @@ import zstandard
 import analyze
 import artifacts
 import faceit_stats
+import rollup
 import report
 
 FACEIT_API = "https://open.faceit.com/data/v4"
@@ -64,6 +65,8 @@ SA = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount")
 STATE_KEY = "state/processed.json"
 STATS_KEY = "results/faceit_stats.json"
 IMAGE = os.environ.get("IMAGE_TAG", "")
+PLAYER_TABLE_KEY = "analytics/player_match.parquet"
+MATCH_TABLE_KEY = "analytics/match.parquet"
 RESULTS_KEY = "results/results.json"
 TREND_KEY = "results/trend.csv"
 DEMO_PREFIX = "demos/"
@@ -324,6 +327,24 @@ def write_artifacts(match, key, stats):
         log("  artifact write failed: %s" % traceback.format_exc().splitlines()[-1])
 
 
+def write_rollup(results, stats):
+    """Rebuild the analytics tables from every parsed match.
+
+    Rebuilt rather than appended: a metric fix should correct history, and the whole
+    table is a few thousand rows.
+    """
+    try:
+        players, matches = rollup.build(results, stats)
+        s3().put_object(Bucket=BUCKET, Key=PLAYER_TABLE_KEY, Body=players,
+                        ContentType="application/vnd.apache.parquet")
+        s3().put_object(Bucket=BUCKET, Key=MATCH_TABLE_KEY, Body=matches,
+                        ContentType="application/vnd.apache.parquet")
+        log("rollup: %s (%.0f KB) + %s (%.0f KB)"
+            % (PLAYER_TABLE_KEY, len(players) / 1000, MATCH_TABLE_KEY, len(matches) / 1000))
+    except Exception:
+        log("rollup failed: %s" % traceback.format_exc().splitlines()[-1])
+
+
 def publish_report(results, stats=()):
     """Render the pages and push them into the ConfigMap the web pod mounts.
 
@@ -409,6 +430,7 @@ def main():
 
     put_json(RESULTS_KEY, results)
     append_trend(rows)
+    write_rollup(results, stats)
     publish_report(results, stats)
     state["demos"] = sorted(seen)
     put_json(STATE_KEY, state)

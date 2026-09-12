@@ -30,6 +30,7 @@ Beyond kills and damage, the things that actually explain lost rounds:
 | `analyze.py` | The parser and all metrics. `analyze(dem)` returns one match; run directly for a per-match and pooled table. |
 | `team.py` | Team report: individual performance, role signals, per-half tables, trade/flash/proximity matrices. |
 | `cluster_run.py` | The CronJob entrypoint. Fetches new FACEIT demos, parses one at a time in scratch, writes results back to R2, publishes the report. |
+| `rollup.py` | Derived analytics: `analytics/player_match.parquet` and `analytics/match.parquet`, tidy and rebuilt every run. |
 | `artifacts.py` | Canonical per-match files: `matches/<date>/<match_id>/{metadata,teams,players/*}.json`. Everything derived is rebuilt from these. |
 | `faceit_stats.py` | Per-match stats from the API - no demo needed. Schema-agnostic: undocumented keys are kept as returned. |
 | `upload_demos.py` | Uploads demos from this machine into the bucket. Runs on your PC, not in the image. |
@@ -110,6 +111,38 @@ Two routes, and the job parses whatever it finds either way:
    the only one for Premier demos, which CS2 writes to disk locally.
 2. **Let the job fetch them**, once `FACEIT_DOWNLOADS_TOKEN` exists. The Data API alone
    is not enough - its demo URLs are private resource URLs, not downloadable links.
+
+## Querying
+
+Both tables are tidy (long), so a new metric is new rows rather than a schema change:
+
+```
+date, match_id, map, source, player, team, stat_source, scope, metric, value
+```
+
+`stat_source` is `demo` or `faceit` and they are never merged - the two measure
+different things. `scope` is `all`, `t`, `ct`, `h1`, `h2` or `ot`. Metric names are
+normalised for SQL (`moving_1st_shot_pct`, `util_thrown_per_round`, `flash_to_kill`),
+and both rates and raw counters are present: rates answer "how good", `count_*`
+answers "how much" and lets you re-aggregate correctly across matches.
+
+```sql
+CREATE SECRET r2 (TYPE s3, KEY_ID '...', SECRET '...',
+                  ENDPOINT '<account>.r2.cloudflarestorage.com');
+
+-- where the movement problem is worst
+SELECT map, avg(value) FROM 's3://cs2-demos/analytics/player_match.parquet'
+WHERE player = 'mirithefish' AND metric = 'moving_1st_shot_pct' AND scope = 'all'
+GROUP BY map ORDER BY 2 DESC;
+
+-- second halves versus first, per player
+SELECT player, scope, avg(value) FROM 's3://cs2-demos/analytics/player_match.parquet'
+WHERE metric = 'adr' AND scope IN ('h1','h2') GROUP BY 1,2 ORDER BY 1,2;
+
+-- does the team convert the opening kill?
+SELECT metric, avg(value) FROM 's3://cs2-demos/analytics/match.parquet'
+WHERE metric LIKE '%opening_conversion%' GROUP BY 1;
+```
 
 ## Notes
 

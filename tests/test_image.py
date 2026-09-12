@@ -10,7 +10,7 @@ import re
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 SHIPPED = {"analyze.py", "team.py", "report.py", "faceit_stats.py", "artifacts.py",
-           "cluster_run.py"}
+           "rollup.py", "cluster_run.py"}
 # Runs on the machine that has the demo files, never in the cluster, so it is
 # deliberately not in the image.
 LOCAL_ONLY = {"conftest.py", "upload_demos.py"}
@@ -45,7 +45,7 @@ def test_entrypoint_imports_are_all_shipped():
 
 def test_build_runs_an_import_check():
     """The build must fail on a missing module rather than the pod."""
-    assert "import analyze, report, team, faceit_stats, artifacts, cluster_run" in DOCKERFILE
+    assert "import analyze, report, team, faceit_stats, artifacts, rollup, cluster_run" in DOCKERFILE
 
 
 def test_version_is_pinned_and_parseable():

@@ -2,4 +2,6 @@
 demoparser2==0.42.0
 zstandard>=0.22,<1.0
 pandas>=2.2,<4.0
+# imported directly by rollup.py, not just as a pandas dependency
+pyarrow>=15.0,<30.0
 boto3>=1.34,<2.0
