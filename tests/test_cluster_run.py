@@ -6,6 +6,7 @@ that decides what gets written and when publishing is refused.
 """
 import csv
 import io
+import json
 import pathlib
 
 import pytest
@@ -84,6 +85,64 @@ class TestPublishGuards:
         monkeypatch.setattr(cluster_run, "log", logged.append)
         cluster_run.publish_report([match])
         assert any("no service account" in m for m in logged)
+
+
+class TestConfigMapReplacesRatherThanMerges:
+    """A merge patch only adds and overwrites, so a page we stop generating stays
+    served forever, frozen at whatever it said the day it was dropped."""
+
+    def publish(self, match, tmp_path, monkeypatch, pages=("index.html",)):
+        sa = tmp_path / "sa"
+        sa.mkdir()
+        (sa / "namespace").write_text("cs2")
+        (sa / "token").write_text("t0ken")
+        (sa / "ca.crt").write_text("not-a-real-pem")
+        monkeypatch.setattr(cluster_run, "REPORT_CONFIGMAP", "cs2-report")
+        monkeypatch.setattr(cluster_run, "REPORT_DIR", tmp_path / "out")
+        monkeypatch.setattr(cluster_run, "SA", sa)
+        monkeypatch.setattr(cluster_run.ssl, "create_default_context", lambda cafile=None: None)
+
+        def fake_render(results, out_dir, stats=()):
+            d = pathlib.Path(out_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            written = []
+            for name in pages:
+                (d / name).write_text("<title>%s</title>" % name, encoding="utf-8")
+                written.append(d / name)
+            return written
+
+        monkeypatch.setattr(cluster_run.report, "render", fake_render)
+
+        sent = {}
+
+        class Resp:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_open(req, timeout=None, context=None):
+            sent["method"] = req.get_method()
+            sent["type"] = req.get_header("Content-type")
+            sent["body"] = json.loads(req.data.decode())
+            return Resp()
+
+        monkeypatch.setattr(cluster_run.urllib.request, "urlopen", fake_open)
+        cluster_run.publish_report([match])
+        return sent
+
+    def test_the_whole_data_map_is_replaced(self, match, tmp_path, monkeypatch):
+        sent = self.publish(match, tmp_path, monkeypatch, pages=("index.html", "player-a.html"))
+        assert sent["method"] == "PATCH"
+        assert sent["type"] == "application/json-patch+json"
+        assert [op["op"] for op in sent["body"]] == ["add"]
+        assert sent["body"][0]["path"] == "/data"
+        assert set(sent["body"][0]["value"]) == {"index.html", "player-a.html"}
+
+    def test_a_page_we_no_longer_render_is_not_in_the_payload(self, match, tmp_path, monkeypatch):
+        """team.html outlived the redesign that deleted it; replacing /data is what
+        stops the next dropped page doing the same."""
+        sent = self.publish(match, tmp_path, monkeypatch, pages=("index.html",))
+        assert "team.html" not in sent["body"][0]["value"]
 
 
 class TestDemoKeys:

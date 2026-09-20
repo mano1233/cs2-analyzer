@@ -409,10 +409,17 @@ def publish_report(results, stats=()):
         return
     url = ("https://kubernetes.default.svc/api/v1/namespaces/%s/configmaps/%s"
            % (namespace, REPORT_CONFIGMAP))
+    # A JSON Patch that replaces /data outright, rather than a merge patch that only
+    # adds and overwrites. A merge left every page we stopped generating served forever,
+    # frozen at whatever it said the day it was dropped - team.html outlived the redesign
+    # that deleted it. "add" on an existing member replaces it (RFC 6902) and creates it
+    # when the ConfigMap has no data yet, so one op covers both. Only /data is touched,
+    # so the labels and annotations Terraform owns are left alone.
+    body = [{"op": "add", "path": "/data", "value": payload}]
     req = urllib.request.Request(
-        url, method="PATCH", data=json.dumps({"data": payload}).encode(),
+        url, method="PATCH", data=json.dumps(body).encode(),
         headers={"Authorization": "Bearer " + token,
-                 "Content-Type": "application/merge-patch+json"})
+                 "Content-Type": "application/json-patch+json"})
     ctx = ssl.create_default_context(cafile=str(SA / "ca.crt"))
     try:
         with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
