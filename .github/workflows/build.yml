@@ -81,6 +81,8 @@ jobs:
   merge:
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -113,3 +115,26 @@ jobs:
 
       - name: Show what was published
         run: docker buildx imagetools inspect "${IMAGE}:${{ steps.version.outputs.tag }}"
+
+  # Tells midgard the tag exists, so its Image Bump workflow opens (or moves forward) the
+  # PR that pins it. Without MIDGARD_DISPATCH_TOKEN this only logs a notice: publishing
+  # the image never depends on midgard.
+  notify-midgard:
+    needs: merge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch image-published to midgard
+        env:
+          GH_TOKEN: ${{ secrets.MIDGARD_DISPATCH_TOKEN }}
+          TAG: ${{ needs.merge.outputs.tag }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::MIDGARD_DISPATCH_TOKEN is not set; midgard was not told about $TAG"
+            exit 0
+          fi
+          gh api "repos/mano1233/midgard/dispatches" \
+            -f event_type=image-published \
+            -f "client_payload[app]=${GITHUB_REPOSITORY#*/}" \
+            -f "client_payload[tag]=$TAG" \
+            -f "client_payload[sha]=$GITHUB_SHA"
+          echo "Asked midgard to pin ${GITHUB_REPOSITORY#*/} $TAG" >> "$GITHUB_STEP_SUMMARY"
