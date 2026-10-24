@@ -117,21 +117,35 @@ jobs:
         run: docker buildx imagetools inspect "${IMAGE}:${{ steps.version.outputs.tag }}"
 
   # Tells midgard the tag exists, so its Image Bump workflow opens (or moves forward) the
-  # PR that pins it. Without MIDGARD_DISPATCH_TOKEN this only logs a notice: publishing
-  # the image never depends on midgard.
+  # PR that pins it. It authenticates as the midgard-bump GitHub App, whose one-hour
+  # token is minted here and only reaches midgard. Until the app key is set this only
+  # logs a notice: publishing the image never depends on midgard.
   notify-midgard:
     needs: merge
     runs-on: ubuntu-latest
+    env:
+      HAS_APP_KEY: ${{ secrets.MIDGARD_BUMP_APP_KEY != '' && vars.MIDGARD_BUMP_APP_ID != '' && 'true' || 'false' }}
     steps:
+      - name: Skip without the app
+        if: env.HAS_APP_KEY == 'false'
+        run: echo "::notice::MIDGARD_BUMP_APP_ID / MIDGARD_BUMP_APP_KEY are not set; midgard was not told about ${{ needs.merge.outputs.tag }}"
+
+      - name: Get a midgard-bump token
+        id: app
+        if: env.HAS_APP_KEY == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.MIDGARD_BUMP_APP_ID }}
+          private-key: ${{ secrets.MIDGARD_BUMP_APP_KEY }}
+          owner: mano1233
+          repositories: midgard
+
       - name: Dispatch image-published to midgard
+        if: env.HAS_APP_KEY == 'true'
         env:
-          GH_TOKEN: ${{ secrets.MIDGARD_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           TAG: ${{ needs.merge.outputs.tag }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::MIDGARD_DISPATCH_TOKEN is not set; midgard was not told about $TAG"
-            exit 0
-          fi
           gh api "repos/mano1233/midgard/dispatches" \
             -f event_type=image-published \
             -f "client_payload[app]=${GITHUB_REPOSITORY#*/}" \
