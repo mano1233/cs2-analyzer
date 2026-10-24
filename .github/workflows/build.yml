@@ -107,10 +107,19 @@ jobs:
 
       - name: Create the multi-arch manifest
         working-directory: /tmp/digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          docker buildx imagetools create \
-            -t "${IMAGE}:${{ steps.version.outputs.tag }}" \
-            -t "${IMAGE}:latest" \
+          tags=(-t "${IMAGE}:latest")
+          # A released version is never rebuilt: its image stays what v<VERSION> in git
+          # built, so a merge that leaves VERSION alone only moves latest.
+          if gh release view "v$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::v$TAG is already released; publishing only :latest"
+          else
+            tags+=(-t "${IMAGE}:${TAG}")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
             $(printf "${IMAGE}@sha256:%s " *)
 
       - name: Show what was published
