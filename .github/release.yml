@@ -1,0 +1,21 @@
+# Groups the notes `gh release create --generate-notes` writes for each v<VERSION>.
+# PRs are sorted by the type:<type> label the PR conventions workflow sets from the
+# title; CI and housekeeping changes are left out because nobody using the app cares.
+changelog:
+  exclude:
+    labels:
+      - type:ci
+      - type:chore
+  categories:
+    - title: Features
+      labels:
+        - type:feat
+    - title: Fixes
+      labels:
+        - type:fix
+    - title: Performance
+      labels:
+        - type:perf
+    - title: Other changes
+      labels:
+        - "*"
